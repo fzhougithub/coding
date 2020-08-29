@@ -1,0 +1,4 @@
+#!/bin/bash
+
+
+while read -p "type word:" name;do unset a;unset r;while read -n 1 c;do a+=($c);done <<< $name;echo "${a[@]}";n=0;r=();while [ ${#a[@]} -ge 1 ];do t=${a[$n]};echo $t;unset a[$n];if [[ "${a[@]}" =~ ${t} ]];then echo nocheck char: "${a[@]}";echo repeat char:"${r[@]}";r+=($t);elif [[ "${r[@]}" =~ ${t} ]];then echo nocheck char: "${a[@]}";echo repeat char:"${r[@]}";r+=($t);else echo got it: position:$(($n+1)): character:$t; break; fi;n=$(($n+1));sleep 1;done;done
