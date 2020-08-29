@@ -1,0 +1,34 @@
+#!/bin/bash
+
+function rand1(){
+    min=$1
+    max=$(($2-$min+1))
+    num=$(($RANDOM+1000000000)) #增加一个10位的数再求余
+    echo $(($num%$max+$min))
+}
+
+rnd=$(rand1 400000 500000)
+echo $rnd
+
+function rand2(){
+    min=$1
+    max=$(($2-$min+1))
+    #num=$(date +%s%N) # seconds, nanoseconds
+    num=$(date +%s)  # Mac does not support nanoseconds, get rid of N
+    echo $(($num%$max+$min))
+}
+
+rnd=$(rand2 50)
+echo $rnd
+
+cat /dev/urandom|head -10|cksum|cut -d' ' -f1
+
+cat /proc/sys/kernel/random/uuid|cksum|cut -d' ' -f1
+
+#使用date 生成随机字符串
+date +%s%N | md5sum | head -c 10
+
+#使用 /dev/urandom 生成随机字符串
+cat /dev/urandom | head -n 10 | md5sum | head -c 10
+
+exit 0

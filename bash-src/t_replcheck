@@ -1,0 +1,14 @@
+#!/bin/bash
+
+# 1. want to edit the long command, see the previous command, ctrl+x+ctrl+e, after edit, just modify and run
+# 2. array += "{line[@]}" not equal to += "line[@]", very different, the first one, keep 2, second is just one
+# 3. read -a read into array, just use the regular is OK
+# 4. regex remember to quote the keyword with begin and the end
+# 5. * * * * * sleep 30; < your code > in this way, setup second level cron. Smart. 
+# On mac, change the default editor, export EDITOR="vim"
+
+ignores="^1158$|^1159$|^1008$|^1007$|^1062$";while IFS=":" read -a line;do if [ ${line[0]} == 'Last_SQL_Errno' ] && [[ ${line[1]} =~ $ignores ]];then echo ${line[@]};else continue;fi; done< <(mysql -e 'show slave status\G'|grep ":");
+
+unset h;ignores="^1158$|^1159$|^1008$|^1007$|^1062$";while IFS=":" read -a line;do echo ${line[@]};h+="${line[@]}";if [ ${line[0]} == 'Last_SQL_Errno' ] && [[ ${line[1]} =~ $ignores ]];then echo ${line[@]};else continue;fi; done< <(mysql -e 'show slave status\G'|grep "Last_SQL_Errno"); echo "${h}"
+
+

@@ -1,0 +1,201 @@
+#!/usr/local/bin/bash 
+
+# mysql -e "show slave status\G"|grep -v '\*'|sed 's/^\ \+//1'|sed 's/\ //1'|sed 's/:\+/|/1'
+#Slave_IO_State|Waiting for master to send event
+#Master_Host|db01.iic3.pool.sv1.247-inc.net
+#Master_User|repl
+#Master_Port|3306
+#Connect_Retry|60
+#Master_Log_File|db01_iic3_pool_sv1_247-inc_net-log-bin.000943
+#Read_Master_Log_Pos|289072831
+#Relay_Log_File|mysqld-relay-bin.001475
+#Relay_Log_Pos|52980
+#Relay_Master_Log_File|db01_iic3_pool_sv1_247-inc_net-log-bin.000941
+#Slave_IO_Running|Yes
+#Slave_SQL_Running|No
+#Replicate_Do_DB|
+#Replicate_Ignore_DB|mysql,MediaServer,FredMediaServer,dynamic_audio_runtime,nonreplicated,FredServer,FatAsset
+#Replicate_Do_Table|
+#Replicate_Ignore_Table|
+#Replicate_Wild_Do_Table|
+#Replicate_Wild_Ignore_Table|
+#Last_Errno|1062
+#Last_Error|Error 'Duplicate entry '1398193596' for key 'PRIMARY'' on query. Default database: 've'. Query: 'insert into cdr(session_id,tenant,app,time,ani,dnis,testing,engaged,completed,transferred,vxml_duration,vxml_billing_duration,session_duration,session_billing_duration,info) values('ed4ea870-e8bc-11ea-fb96-001517e116e4','cap1','cap1-esp','2020-08-27 16:27:52.0','8184684971','8002274825',0,1,1,0,33623,36,33623,36,null)'
+#Skip_Counter|0
+#Exec_Master_Log_Pos|52788
+#Relay_Log_Space|330593746
+#Until_Condition|None
+#Until_Log_File|
+#Until_Log_Pos|0
+#Master_SSL_Allowed|No
+#Master_SSL_CA_File|
+#Master_SSL_CA_Path|
+#Master_SSL_Cert|
+#Master_SSL_Cipher|
+#Master_SSL_Key|
+#Seconds_Behind_Master|NULL
+#Master_SSL_Verify_Server_Cert|No
+#Last_IO_Errno|0
+#Last_IO_Error|
+#Last_SQL_Errno|1062
+#Last_SQL_Error|Error 'Duplicate entry '1398193596' for key 'PRIMARY'' on query. Default database: 've'. Query: 'insert into cdr(session_id,tenant,app,time,ani,dnis,testing,engaged,completed,transferred,vxml_duration,vxml_billing_duration,session_duration,session_billing_duration,info) values('ed4ea870-e8bc-11ea-fb96-001517e116e4','cap1','cap1-esp','2020-08-27 16:27:52.0','8184684971','8002274825',0,1,1,0,33623,36,33623,36,null)'
+#Replicate_Ignore_Server_Ids|
+#Master_Server_Id|9827834
+#Master_UUID|492c6e47-8cef-11e9-b9de-005056afc118
+#Master_Info_File|mysql.slave_master_info
+#SQL_Delay|0
+#SQL_Remaining_Delay|NULL
+#Slave_SQL_Running_State|
+#Master_Retry_Count|86400
+#Master_Bind|
+#Last_IO_Error_Timestamp|
+#Last_SQL_Error_Timestamp|200828 10:42:52
+#Master_SSL_Crl|
+#Master_SSL_Crlpath|
+#Retrieved_Gtid_Set|
+#Executed_Gtid_Set|
+#Auto_Position|0
+
+function fix_1062() {
+#mysql> select distinct constraint_type from table_constraints;
+#+-----------------+
+#| constraint_type |
+#+-----------------+
+#| UNIQUE          |
+#| PRIMARY KEY     |
+#| FOREIGN KEY     |
+#+-----------------+
+#---- Per mysql 5.6 and upper
+case $mysql_version in
+  "5.6") 
+	pk=$(echo "${a[Last_SQL_Error]}"|awk '{print $4}'|tr -d \')
+	db=$(echo "${a[Last_SQL_Error]}"|awk '{print $12}'|tr -d \'.)
+	tbl=$(echo "${a[Last_SQL_Error]}"|sed 's/:/|/2' |awk -F"|" '{print $2}'|tr -d \'|awk '{print $3}'|cut -d'(' -f1)
+	rep_sql=$(echo "${a[Last_SQL_Error]}"|sed 's/:/|/2' |awk -F"|" '{print $2}'|tr -d \')
+	obj=${db}.${tbl}
+	action=$(echo "${a[Last_SQL_Error]}"|sed 's/:/|/2' |awk -F"|" '{print $2}'|tr -d \'|awk '{print toupper($1)}')
+	;;
+  "5.5")
+	pk=$(echo "${a[Last_SQL_Error]}"|awk '{if(/entry/) print $11}'|tr -d \')
+	obj=$(echo "${a[Last_SQL_Error]}"|awk '{print $8}'|tr -d \;)
+	db=$(echo $obj|cut -d. -f1)
+	tbl=$(echo $obj|cut -d. -f2)
+	;;
+  "5.7")
+	;;
+  *)
+	;;
+esac
+
+	echo This is the solution for 1062 duplicate key error
+	echo ====================================================
+	
+	pk_cols=$(mysql -Nse "select column_name from information_schema.COLUMNS where COLUMN_KEY='PRI' and table_schema='$db' and table_name='$tbl';"|sed 's/$/,/g'|tr -d '\n' |sed 's/,$//g')
+	query_existing="select * from $obj where ${pk_cols}=$pk"
+	echo "${a[Last_SQL_Error]}"
+	#echo $query_existing
+	existing=$(mysql -Nse "$query_existing")
+	echo $existing
+	query_fix="set sql_log_bin = off;delete from $obj where ${pk_cols}=$pk;set sql_log_bin = on;start slave;"
+	echo ---- $query_fix
+	if [ ${dryrun} == 'run' ];then
+		mysql -Nse "$query_fix"
+		echo "$DATE INFO auto_fix duplicate key $obj($pk)"
+	else
+		echo "$DATE INFO you can manually run above code to fix"
+	fi
+
+}
+
+function get_err_info() {
+	ERRORCODES="${a[Last_Errno]}:${a[Last_IO_Errno]}:${a[Last_SQL_Errno]}"
+	if [[ "${a[Last_Errno]}" -gt 0 || "${a[Last_IO_Errno]}" -gt 0 || "${a[Last_SQL_Errno]}" -gt 0 ]];then
+		ERRORS="$ERRORS Last_Errno: ${a[Last_Errno]} Last_IO_Errno: ${a[Last_IO_Errno]} Last_SQL_Errno: ${a[Last_SQL_Errno]}"
+	else
+		ERRORS=" without Error"
+	fi
+}
+
+function fix_err() {
+	#echo $ERRORCODES
+	case $ERRORCODES in
+		"1062:0:1062") fix_1062;;
+		"0:0:0")		;;
+		*)	;;
+	esac
+}
+
+function get_param() {
+	#echo $1,$2
+	if [ $# -ne 2 ];then
+		echo "Please input $0 dry|run, n seconds interval"
+		exit 1
+	elif [[ "$1" =~ \b"dry|run"\b && $2 -ge 10 ]]; then
+		dryrun=$1
+		interval=$2
+	else
+		echo $1 should be dry or run, $2 should be more than 10 seconds
+		exit 2
+	fi
+}
+
+# ------------- Main -------------------
+
+dryrun=
+interval=
+
+#get_param
+
+#echo $1,$2
+if [ $# -ne 2 ];then
+        echo "Please input $0 dry|run, n seconds interval"
+        exit 1
+elif [[ ${1} == "dry" || $1 == 'run' ]] && [ $2 -ge 10 ]; then
+        dryrun=$1
+        interval=$2
+else
+        echo $1 should be dry or run, $2 should be more than 10 seconds
+        exit 2
+fi
+
+declare -A a
+declare -A err
+
+for ((;;))
+do
+
+DATE=$(date +%Y-%m-%d' '%H:%M:%S)
+ERRORS=''
+ERRORCODES=''
+
+version=$(mysql --version|cut -d, -f1|cut -d' ' -f6)
+mysql_version=$(echo ${version:0:3})
+echo $mysql_version
+
+while IFS="|" read key value; do a+=([$key]=$value);done< <(mysql -e "show slave status\G"|grep -v '\*'|sed 's/^\ \+//1'|sed 's/\ //1'|sed 's/:\+/|/1')
+
+#for i in "${!a[@]}";do echo $i=${a[$i]};done
+
+#echo Slave_IO_Running:${a['Slave_IO_Running']} Slave_SQL_Running:${a['Slave_SQL_Running']}
+
+rep_state="${a['Slave_IO_Running']} ${a['Slave_SQL_Running']}"
+#echo $rep_state
+case $rep_state in
+  "No No") 		echo "$DATE WARN Slave Stop " ;;
+  "Yes Yes")		echo "$DATE INFO OK" ;;
+  "Connecting Yes")	echo "$DATE ERROR Can not connect master host:" "${a[Master_Host]}";; 	  
+  "Yes No")		get_err_info
+			echo "$DATE ERROR slave_sql_thread stop $ERRORS"
+			fix_err
+			;;
+  "No Yes")		echo "$DATE ERROR slave_io_thread stop";;
+  "*")			echo "$DATE INFO replication is not setup";;
+esac
+
+sleep 10
+
+done
+
+exit 0
+
+

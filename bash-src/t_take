@@ -1,0 +1,55 @@
+#!/bin/bash
+
+unset a;read -p "Number of team member:" n;for ((i=0;i<$n;i+=1));do a+=($i);done;echo "The pool is ${a[@]}";
+
+min=$(expr $n - 3)
+max=$n
+echo "The winner score should be between $min  and $max"
+r=()
+winder=()
+
+function good_v() {
+t=0
+while [[ $t -eq 0  &&  ${#a[@]} -ge 1 ]]
+do
+base=$(( $(cat /dev/urandom|head -10|cksum|cut -d' ' -f1) % $n))
+for i in ${!a[@]}
+do
+    if [ ${a[i]} -eq $base ];then
+	#echo a[$i] is: ${a[i]}
+	t=1;
+    fi
+done
+done
+
+}
+
+
+while [ ${#a[@]} -ge 1 ]
+do
+read -p $'\n Type your name:' name
+
+base=$(( $(cat /dev/urandom|head -10|cksum|cut -d' ' -f1) % $n + 1))
+
+good_v
+
+unset a[$base]
+r+=($name,$base)
+echo "The pool still have number: ${a[@]}"
+echo "Result: ${r[@]}"
+
+if [[ $base -ge $min && $base -le $max ]];then
+	winner+=($name,$base)
+	echo "The winders are : ${winner[@]}"
+fi
+
+if [ ${#winner[@]} -eq 3 ];then
+	break
+fi
+
+done
+
+echo "============ Completed! The final winders are : ${winner[@]} ============="
+
+exit 0
+

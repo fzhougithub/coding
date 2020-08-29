@@ -1,0 +1,25 @@
+#!/bin/bash
+
+read -a parm -p "Please import your sentense:"
+
+n=0
+
+wd="[a-A0-9]+$"
+
+#echo use '$@' $@	# read -a directly read into array name parm, if no, will read into parm
+echo use [@] ${parm[@]} # Using this format to print array
+echo use [*] ${parm[*]} # Using this format to print array
+
+#while  [[ ${parm[$n]} =~ ${wd} ]]   
+while [ ! -z ${parm[$n]} ]
+do
+  echo ${parm[$n]}
+  let n=$n+1
+done
+
+myarray=("$@")
+read -p "input the sentense again:"
+#echo "$@"		# THis time use this '$@' format
+echo $REPLY
+
+for i in $REPLY;do echo $i;done

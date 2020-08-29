@@ -1,0 +1,14 @@
+#!/bin/bash
+
+read  -p "Please type in any word, see whether it is integer: "
+INT=$REPLY
+
+if [[ "$INT" =~ ^-?[0-9]+$ ]]; then
+  echo "$INT is an integer."
+  exit 0
+elif [[ "$INT" =~ ^-?[0-9]+.[0-9]+$ ]];then
+  echo "$INT is a decimal number"
+else
+  echo "$INT is a string." >&2
+  exit 1
+fi

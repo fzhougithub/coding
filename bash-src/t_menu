@@ -1,0 +1,17 @@
+#!/bin/bash
+
+read -p $'Please select:\n\r 1) Install a\n\r 2) Install b\n\r 3) Exit\n' ask
+
+case $ask in 
+     1) echo "You want to install A" 
+	;;
+     2) echo "You want to install B"
+       ;;
+     3) echo "Bye Bye"
+	exit 0
+       ;;
+     *) echo "You did not follow instruction"
+       ;;
+esac
+
+exit
