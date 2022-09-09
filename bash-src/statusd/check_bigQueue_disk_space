@@ -1,0 +1,28 @@
+#/bin/bash
+warningThreshold=$1
+criticalThreshold=$2
+dirPath=$3
+
+##status
+_OK=0
+_WARNING=1
+_CRITICAL=2
+status=$_OK
+
+dirSize=`du -s "$dirPath" |  awk '{print $1;}'`
+
+if [ "$dirSize" -ge "$criticalThreshold" ]
+then
+	status=$_CRITICAL
+	echo "CRITICAL: The size of bigqueue has gone beyond threshold"
+	echo "__OUTPUT__"
+	echo "The dirSize is : $dirSize"
+elif [ "$dirSize" -ge "$warningThreshold" ]
+then
+    status=$_WARNING
+	echo "WARNING: The $dirPath size is $dirSize"	
+else
+	status=$_OK
+	echo "OK: The $dirPath size is fine"
+fi
+exit $status

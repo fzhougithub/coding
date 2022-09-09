@@ -1,0 +1,58 @@
+#!/bin/bash
+
+##sh check_kafka_health 10 /var/tellme/assist/logs/app/logfile.log
+
+##logfile.log.2016-05-14-00.logstream01.assist-app.sv1.xxx-inc.net.gz:[2016-05-14 00:14:40,836]  INFO [L:com.tfsc.ilabs.chronos.app.gen.event.pipeline.impl.KafkaEventProcessor T:'TransactionPoller-gen-event-pipeline-app-handler-pool-25-thread-1' I: IS: TR:TRC-1462639792392-4 SQ:2051586 ND:]  - Total count 278, persisted 278, failed 0, incremented 0, ignored 0
+
+critical_count_threshold=$1
+filePath=$2
+criticalTypes=
+
+
+##status
+_OK=0
+_CRITICAL=2
+_WARNING=1;
+status=$_OK
+criticalCount=1;
+warningCount=1;
+
+
+##calculating the total, persisted, failed tuples.
+counts=`grep  "Total count" $filePath | grep "persisted" | sed 's/.*count \([0-9|,]*\), persisted \([0-9|,]*\), failed \([0-9|,]*\), .*/\1    \2    \3/' | sed 's/,//g' | awk '{sum1 += $1; sum2 += $2; sum3 += $3;}; END {print sum1, sum2, sum3}'`
+
+
+count=(${counts// / })
+
+total_count=${count[0]}
+
+failed_count=${count[2]}
+
+persisted_count=${count[1]}
+
+
+
+if [ ! "$total_count" ]; then
+    status=$_CRITICAL;
+    criticalTypes[$criticalCount]="CRITICAL: Kafka must be down, logs for total, persisted and failed tuples are not found!!!";
+    criticalCount=$((criticalCount+1));
+elif [ "$failed_count" -gt "$critical_count_threshold" ]; then
+    status=$_CRITICAL;
+    criticalTypes[$criticalCount]="CRITICAL: More than $critical_count_threshold of the tuples are failing to persist, Total $total_count, Persisted $persisted_count, Failed $failed_count";
+    criticalCount=$((criticalCount+1));
+fi
+
+
+if [ "$status" == "$_CRITICAL" ]; then
+    echo "CRITICAL: There is a problem in kafka processing"
+    echo "__OUTPUT__"
+    for i in "${criticalTypes[@]}"
+    do
+        echo $i
+    done
+else
+    echo "OK: All the tuples are getting persisted by kafka"
+fi
+
+
+exit $status

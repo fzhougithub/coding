@@ -1,0 +1,279 @@
+#!/usr/local/bin/perl 
+
+# $Id$
+use strict;
+use LWP;
+use Sys::Hostname;
+use Data::Dumper;
+
+use constant UNK    => -1;
+use constant OK     => 0;
+use constant WARN   => 1;
+use constant CRIT   => 2;
+
+my $Hostname 	= $ARGV[0] || hostname();
+my $Verdad		= "verdad";
+my $Program     = ($0 =~ m!^.*/([^/]*)$!)[0];
+my $Version     = '0.01';
+my $Count 		= 0;
+my @output;
+my @map_file;
+
+my $map			= "/usr/local/etc/pkg-to-module.list";
+# my $map			= "/home/mattd/pkg-to-module.list";
+my $Stow        = '/usr/local/bin/stow';
+my $Tools_arch  = '/usr/local/bin/tools_arch';
+die "$map not found.\n" unless -e $map;
+die "$Stow not found.\n" unless -x $Stow;
+die "$Tools_arch not found.\n" unless -x $Tools_arch;
+	
+my ($Cpu, $Arch, $Rel) = &Arch;
+
+my %mod_pkgs = Fetch_Pkgs($Hostname);
+
+
+open(MAP, "$map") || warn("Unable to open $map: $!\n");
+while(<MAP>) {
+	chomp $_;
+	push(@map_file, $_);
+}
+close(MAP);
+
+&In_Verdad(%mod_pkgs);
+&On_Disk;
+
+&Ok("Created a .module file in $Count packages\n");
+
+#--------------------------------------------------------------------
+# Arch: determines Architecture and CPU
+#--------------------------------------------------------------------
+sub Arch {
+	my $arch	= `$Tools_arch`;
+	my $rel		= `$Tools_arch -r`;
+	my $cpu;
+
+	chomp($arch, $rel);
+	
+	if ($arch =~ m/solx86/) {
+	    $cpu = "i386";
+	} elsif ($arch =~ m/solaris/) {
+	    $cpu = "sparc";
+	}
+	return($cpu, $arch, $rel);
+}
+
+#--------------------------------------------------------------------
+# In_Verdad: creates a mod file in a package for those pkgs in verdad
+#--------------------------------------------------------------------
+sub In_Verdad {
+	my %mod_pkgs = @_;
+
+	my $mod_file;
+	my $package;
+
+	foreach my $mod (keys %mod_pkgs) {
+		my $pkg			= $mod_pkgs{$mod};
+
+		$package		= "/tools/stow/$Arch/$pkg";
+		$mod_file		= "$package/.module";
+
+		# Deal with packages listed in Verdad
+		if (-d $package) {
+			open(MD, ">$mod_file") || die("Unable to create $mod_file: $!\n");
+			print MD "$mod\n";
+			close(MD);
+			push(@output, "Created module file ($mod) for verdad pkg $pkg\n");
+			$Count++;
+		} 
+	}
+}
+
+#--------------------------------------------------------------------
+# On_Disk: creates mod files for packges not listed as correct 
+# currently in Verdad. There is no tie between pkg items and module 
+# items in Verdad for packages that are not the current correct pkg
+# so we use a map file dumped from DeployMe
+#--------------------------------------------------------------------
+sub On_Disk {
+	my @local_pkgs;
+
+	opendir(DIR, "/tools/stow/$Arch") || die("Unable to open /tools/stow/$Arch: $!\n");
+	my @arch = readdir(DIR);
+	closedir(DIR);
+
+	if (-d "/tools/stow/$Rel") {
+		opendir(REL, "/tools/stow/$Rel") || die("Unable to open /tools/stow/$Rel: $!\n");
+		my @rel = readdir(REL);
+		closedir(REL);
+
+		@local_pkgs = (@arch, @rel);
+	} else {
+		@local_pkgs = @arch;
+	}
+
+	foreach my $local_pkg (@local_pkgs) {
+		next if ($local_pkg =~ m/^\.(\.)?$/); # skip directory dot files
+
+		my $package	 = "/tools/stow/$Arch/$local_pkg";  
+		my $mod_file = "$package/.module";
+
+		my ($pkge, $module) = split('::', (grep(/$local_pkg/, @map_file))[0]); 
+
+		# First try to guess
+		if ($local_pkg =~ m/^(tool-(static-)?)?(\w+)-\d(\d|\.|-).*/) {
+			my $mod = $3;
+			if (defined($mod)) {
+				open(LM, ">$mod_file") || warn("Unable to create $mod_file: $!\n");
+				print LM "$mod\n";
+				close(LM);
+				push(@output, "Created module file ($mod) for $local_pkg using best guess\n"); 
+			}
+		}
+
+		# Then hope that the guess gets replaced by what we 
+		# find in the map file
+		if(defined($module)) {
+			open(LMD, ">$mod_file") || warn("Unable to create $mod_file: $!\n");
+			print LMD "$module\n";
+			close(LMD);
+			push(@output, "Created module file ($module) for $local_pkg from map file\n");
+			$Count++;
+		}
+	}	
+
+	# Check to see which packages we couldn't make a mod file for
+	foreach my $pkg (@local_pkgs) {
+		next if ($pkg =~ m/^\.(\.)?$/);
+		my $package	 = "/tools/stow/$Arch/$pkg";  
+		my $mod_file = "$package/.module";
+	
+		if (! -e $mod_file) {
+			push(@output, "Could not determine module for $pkg\n");
+		}
+	}
+}
+
+#--------------------------------------------------------------------
+# Warn: prints a statusd warning and exits
+#--------------------------------------------------------------------
+sub Warn {
+	my $msg = shift;
+	print "MODULE FILES - WARNING - $msg\n";
+	print "_OUTPUT_\n";
+	print @output;
+	exit(WARN);
+}
+
+#--------------------------------------------------------------------
+# Ok: prints statusd friendly output and exits
+#--------------------------------------------------------------------
+sub Ok {
+	my $msg = shift;
+	print "MODULE FILES - OK - $msg\n";
+	print "__OUTPUT__\n";
+	print @output;
+	exit(OK);
+}
+#--------------------------------------------------------------------
+# Fetch_Pkgs: obtains a list of pacakges from Verdad
+#--------------------------------------------------------------------
+sub Fetch_Pkgs {
+
+# an example line from verdad:
+# module-xxxx-is = module_name
+# package-bash-2.03-scs  =  bash-2.03
+# package-oracle-client-8-1-7-scs = oracle-client-8-1-7.RELEASE.i386.solaris.5_7 
+    my %mod_tbl;
+	my %mod_pkg_tbl;
+    my @host_item = get_individual_item($Hostname, $Verdad);
+	my $module;
+	my $pkg;
+
+    foreach my $line (@host_item) {
+        if ($line =~ m/^\s*module-(.*)-is\s+=\s+(.*)\s+\(.*\)$/) {
+            $module = $1;
+			$pkg	= $2;
+			$pkg 	=~ s/\s+$//g; # strip off trailing white space
+			next if ($pkg =~ m/check_/); # we know we can skip checks
+			if ((defined($module)) && (defined($pkg))) {
+				$mod_tbl{$module} = $pkg;
+			}
+        }
+	}
+	# Now we have a mod and a possible pkg to look for
+	foreach my $mod (keys %mod_tbl) {
+		foreach my $line (@host_item) {
+			if ($line =~ m/^\s*package-$mod_tbl{$mod}-scs\s+=\s+(.*)\s+\(.*\)$/) {
+				my $package = $1;
+				$package =~ s/\s+$//g; # strip off trailing white space
+
+				# Check that this pkg is for our architecture
+				# or arch independent
+				if ($package =~ m/.*\.RELEASE$/) { 
+					$mod_pkg_tbl{$mod} = $package;
+				} elsif ($package =~ m/.*\.RELEASE\.$Cpu\..*/) {
+					$mod_pkg_tbl{$mod} = $package;
+				} elsif ($package !~ m/\.*\.RELEASE\.\w+\..*/) {
+					# toolme pkgs that are not of a differing arch
+					$mod_pkg_tbl{$mod} = $package;
+				}
+			} 
+        }
+
+	# Handle over ridden packages
+		if (! exists($mod_pkg_tbl{$mod})) {
+	   		# print "$mod has an over ride to $mod_tbl{$mod} or there is no package for our architecture\n";
+	       	my @package_item = get_individual_item($mod_tbl{$mod}, $Verdad);
+			foreach my $pkg_line (@package_item) {
+				if ($pkg_line =~ m/^\s*package-$mod_tbl{$mod}-scs\s+=\s+(.*)\s+\(.*\)$/) {
+	           	my $package = $1;
+	            $package =~ s/\s+$//g; # strip off trailing white space
+	
+	            # Check that this pkg is for our architecture
+	            # or arch independent
+	            if ($package =~ m/.*\.RELEASE$/) {
+	            	# print "Matched $package\n"; # arch independent
+	               	$mod_pkg_tbl{$mod} = $package;
+	            } elsif ($package =~ m/.*\.RELEASE\.$Arch\..*/) {
+	            	# print "Matched $package built for $Arch\n"; # our arch
+	                $mod_pkg_tbl{$mod} = $package;
+				} elsif ($package !~ m/\.*\.RELEASE\.\w+\..*/) {
+	           		# print "Matched $package\n";
+	                # toolme pkgs that are not of a differing arch
+	                $mod_pkg_tbl{$mod} = $package;
+	                }
+				}
+			}
+	    }
+	}
+	return(%mod_pkg_tbl);
+}
+
+#---------------------------------------------------------
+# get_individual_item: obtains host item from verdad
+#---------------------------------------------------------
+sub get_individual_item {
+    my ($this_item, $Server) = @_;
+    my $url = "http://$Server/perl/item?mode=text&version=1&item=$this_item";
+    my $req = new HTTP::Request("GET", $url);
+    my $ua  = new LWP::UserAgent;
+    my $rsp;
+    my @rsp;
+    my @ip;
+
+    $req->authorization_basic('auto', 'auto');
+    $ua->agent("$Program" . '/' . "$Version");
+    $rsp = $ua->request($req);
+
+    if ($rsp->is_success) {
+        @rsp = split("\n", $rsp->content);
+        if (@rsp) {
+            # print "Obtained attributes for $this_item\n";
+        } else {
+            # warn "Unable to obtain attributes for $this_item.\n";
+        }
+    } else {
+        print "$rsp->status_line", "\n";
+    }
+    return(sort(@rsp));
+}

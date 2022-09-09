@@ -1,0 +1,723 @@
+#!/usr/local/bin/perl -w
+
+# $Id$
+#
+# check_packagediff:    provides output detailing
+#                       the differences between locally linked
+#                       packages and those listed in Verdad
+
+BEGIN {
+    # For testing. When statusd is installed Packages.pm ends up in /usr/local/lib
+    unshift (@INC, "/usr/local/lib", "/home/mattd", "/home/mattd/work/tools/statusd/lib");
+}
+
+use strict;
+use LWP;
+use Getopt::Long;
+use Sys::Hostname;
+use Data::Dumper;
+use Packages ('FetchModsPkgs', 'Arch', 'PingServer'); 
+
+$ENV{"PATH"}="/usr/local/bin:/usr/bin:/usr/local/libexec";
+
+my $Program		= ($0 =~ m!^.*/([^/]*)$!)[0];
+my $Version		= '1.00';
+my $Hostname	= hostname();
+my $Opts;
+my $pkgs;
+
+# MAIN
+$Opts 			= &parse_args;
+my $Verdad		= $Opts->{'verdad'};
+
+# after parse_args so that "logfile" is defined
+$SIG{'__WARN__'} = \&log_warn;
+$SIG{'__DIE__'}  = \&log_fatal;
+
+# temporary
+my %fx = ( 'black'   => "\033[30m",
+           'red'     => "\033[31m",
+           'green'   => "\033[32m",
+           'yellow'  => "\033[33m",
+           'blue'    => "\033[34m",
+           'magenta' => "\033[35m",
+           'cyan'    => "\033[36m",
+           'white'   => "\033[37m",
+           'under'   => "\033[4m",
+           'blink'   => "\033[5m",
+           'reverse' => "\033[5m",
+           'bold'    => "\033[1m",
+           'off'     => "\033[0m");
+
+my %hx = ( 'red'     => "\<font color=red\>",
+           'green'   => "\<font color=green\>",
+           'yellow'  => "\<font color=yellow\>",
+           'blue'    => "\<font color=blue\>",
+           'off'     => "\<\/font\>");
+
+my $Stow        = '/usr/local/bin/stow';
+my $Tools_arch  = '/usr/local/bin/tools_arch'; 
+die "$Stow not found.\n" unless -x $Stow;
+die "$Tools_arch not found.\n" unless -x $Tools_arch;
+
+my ($Cpu, $Arch, $Rel) 		= &Arch;
+my $Tools_dir				= "/tools/stow/$Arch";
+my $Checksums_dir			= "/var/tellme/checksums";
+my $List					= "/var/tellme/log/link.list";
+my $Module_field_length 	= 30;
+my $Pkg_field_length 		= 80;
+my $Directive_field_length 	= 8;
+
+&PingServer($Verdad);					# Make sure Verdad is available.
+$pkgs = &make_package_list;				# Obtain a list of pkgs.
+
+# For debugging
+#my %pkgs = %{$pkgs};
+#print "package_list:\n", Dumper(\%pkgs);
+
+$pkgs = &compare_package_list($pkgs); 	# Compare lists.
+
+if ($Opts->{'debug'}) {
+	&print_text($pkgs);	# Pretty print and text print for terminal. 
+} else {
+	&print_html($pkgs);
+}
+
+
+#---------------------------------------------------------
+# get_individual_item: obtains host item from verdad
+#---------------------------------------------------------
+sub get_individual_item {
+    my ($this_item, $Verdad) = @_;
+    my $url = "http://$Verdad/perl/item?mode=text&version=1&item=$this_item
+";
+    my $req = new HTTP::Request("GET", $url);
+    my $ua  = new LWP::UserAgent;
+    my $rsp;
+    my @rsp;
+    my @ip;
+
+    $req->authorization_basic('auto', 'auto');
+    $ua->agent("$Program" . '/' . "$Version");
+    $rsp = $ua->request($req);
+
+    if ($rsp->is_success) {
+        @rsp = split("\n", $rsp->content);
+        if (@rsp) {
+        # print "Obtained attributes for $this_item\n";
+        } else {
+            warn "Unable to obtain attributes for $this_item.\n";
+        }
+    } else {
+        &log_fatal($rsp->status_line, "\n");
+    }
+    return(sort(@rsp));
+}
+
+#--------------------------------------------------------------------
+# fetch_pkgs: obtains a list of pacakges from Verdad
+#--------------------------------------------------------------------
+sub fetch_pkgs {
+
+# some example lines from verdad:
+# module-xxxx-is = module_name
+# package-bash-2.03-scs  =  bash-2.03
+# package-oracle-client-8-1-7-scs = oracle-client-8-1-7.RELEASE.i386.solari s.5_7
+# package-tool-cricket-config-20010830-1455-md5-hash = 0397cd5c4abf673068f9ba4a9f405dd7 
+
+    my %mod_tbl;
+    my %mod_pkg_tbl;
+	my %final_tbl;
+    my $module;
+    my $pkg;
+	my @package_item;	
+
+    my @host_item = get_individual_item($Hostname, $Verdad);
+
+    foreach my $line (@host_item) {
+        if ($line =~ m/^\s*module-(.*)-is\s+=\s+(.*)\s+\(.*\)$/) {
+            $module = $1;
+            $pkg    = $2;
+            $pkg    =~ s/\s+$//g; # strip off trailing white space
+            # next if ($pkg =~ m/check(-|_)/); # we know we can skip checks
+            if ((defined($module)) && (defined($pkg))) {
+                $mod_tbl{$module} = $pkg;
+            }
+        }
+    }
+
+	# Now we have a mod and a possible pkg to look for
+    foreach my $mod (keys %mod_tbl) {
+        foreach my $line (@host_item) {
+			chomp $line;
+			my $package;
+            if ($line =~ m/^\s*package-$mod_tbl{$mod}-scs\s+=\s+(.*)\s+\(.*\)$/) {
+                $package = $1;
+                $package =~ s/\s+$//g; # strip off trailing white space
+
+                # Check that this pkg is for our architecture
+                # or arch independent
+                if ($package =~ m/.*\.RELEASE$/) {
+                    $mod_pkg_tbl{$mod} = $package;
+                } elsif ($package =~ m/.*\.RELEASE\.$Cpu\..*/) {
+                    $mod_pkg_tbl{$mod} = $package;
+                } elsif ($package !~ m/\.*\.RELEASE\.\w+\..*/) {
+              		# takes care of toolme pkgs of differing arch
+                    $mod_pkg_tbl{$mod} = $package;
+                }
+            }
+		}
+
+		# Handle overrides of packages 
+        if (! exists($mod_pkg_tbl{$mod})) {
+            @package_item = get_individual_item($mod_tbl{$mod}, $Verdad);
+
+			
+            foreach my $pkg_line (@package_item) {
+                my $package;
+                # package-perl-5.005_03-scs = perl-5.005_03 
+                if ($pkg_line =~ m/^\s*package-$mod_tbl{$mod}-scs\s+=\s+(.*)\s+\(.*\)$/) {
+                    $package = $1;
+                    $package =~ s/\s+$//g; # strip off trailing white space
+
+                    # Check that this pkg is for our architecture
+                    # or arch independent
+                    if ($package =~ m/.*\.RELEASE$/) {
+                        $mod_pkg_tbl{$mod} = $package;
+                    } elsif ($package =~ m/.*\.RELEASE\.$Arch\..*/) {
+                        $mod_pkg_tbl{$mod} = $package;
+                    } elsif ($package !~ m/\.*\.RELEASE\.\w+\..*/) {
+                        # toolme pkgs that are not of a differing arch
+                        $mod_pkg_tbl{$mod} = $package;
+                    }
+                }
+            }
+        }
+    }
+
+	my @all_items = (@host_item, @package_item);
+
+    # Found a pkg, now let's find it's md5 hash
+    foreach my $mod (keys %mod_pkg_tbl) {
+		foreach my $item (@all_items) {
+            if ($item =~ m/^\s*package-$mod_tbl{$mod}-md5-hash\s*=\s*(.*)\s*\(.*\)$/) {
+                    my $md5_hash = $1;
+                    $md5_hash =~ s/\s+$//g; # strip off white space
+                    # print "* Adding md5 hash for $mod_tbl{$mod}\n";
+                    push (@ { $final_tbl{$mod} }, $mod_pkg_tbl{$mod}, $md5_hash);
+                } elsif ($item =~ m/-md5-hash/) {
+                    # print "NOT MATCHING: $line\n";
+                }
+        }
+
+        # If we found no md5 hash add the package to the final hash table
+        # without the md5 hash
+        if (!exists($final_tbl{$mod})) {
+            push (@ { $final_tbl{$mod} }, $mod_pkg_tbl{$mod}, '0');
+        }
+    }
+    return(%final_tbl);
+}
+
+#--------------------------------------------------------------------
+# local_packages: builds a hash of packages on disk
+#--------------------------------------------------------------------
+sub local_packages {
+	my @ondisk;
+	opendir(DIR, "$Tools_dir") || &log_fatal("Unable to open $Tools_dir: $!");
+	@ondisk = readdir(DIR);
+	close(DIR);	 
+
+	my %local_mods_pkgs;
+
+	foreach my $pkg (@ondisk) {
+		next if ($pkg =~ m/^(\.|\.\.)$/);
+		my $module;
+		my $mod_file = "$Tools_dir/$pkg/.module";
+		
+		my $md5 = &md5($pkg);
+
+		if (-f $mod_file) {
+			open (MOD, "$mod_file") || warn("Unable to open $mod_file: $!");
+			while (<MOD>) {
+				$module = $_;
+			}
+			chomp $module;
+			close(MOD);
+		} else {
+			# &log_debug("No $mod_file found. Skipping package."); 
+			next;
+		}
+
+		if ((defined($module)) && (defined($md5))) {
+			push (@ { $local_mods_pkgs{$module} }, [ $pkg, $md5 ] );
+		} elsif ((!defined($module)) && (defined($md5))) {
+			$module = "unknown";
+			push (@ { $local_mods_pkgs{$module} }, [ $pkg, $md5 ] );
+		}
+	}
+
+	return(%local_mods_pkgs);
+}
+
+#--------------------------------------------------------------------
+# linked_packages: builds a hash of packages that are linked
+#--------------------------------------------------------------------
+sub linked_packages {
+	my $cmd_arch	= "$Stow -d $Tools_dir -t /usr/local/ -l";
+	my $cmd_rel		= "$Stow -d /tools/stow/$Rel -t /usr/local/ -l";
+	my %linked_pkgs;
+
+	my @arch = `$cmd_arch 2>&1`;
+	my @rel  = `$cmd_rel  2>&1`;
+	chomp(@arch, @rel);
+
+	# Marked linked packages as such
+	foreach my $pkg (@arch) {
+		next if ($pkg =~ m/^(\.|\.\.)$/);
+		my $module;
+		my $mod_file = "$Tools_dir/$pkg/.module";
+		
+		my $md5 = &md5($pkg);
+
+		if (-f $mod_file) {
+			open (MOD, "$mod_file") || warn("Unable to open $mod_file: $!");
+			while (<MOD>) {
+				$module = $_;
+			}
+			chomp $module;
+			close(MOD);
+		} else {
+			&log_debug("No $mod_file found. Package is linked but we cannot determine the module it belongs to."); 
+		}
+
+		if ((defined($module)) && (defined($md5))) {
+			push (@ { $linked_pkgs{$module} }, [ $pkg, $md5 ]);
+		} elsif ((!defined($module)) && (defined($md5))) {
+			$module = "unknown";
+			push (@ { $linked_pkgs{$module} }, [ $pkg, $md5 ]);
+		}
+	}
+	return(%linked_pkgs);
+}
+
+#--------------------------------------------------------------------
+# make_package_list: initializes the module/pkg hash from Verdad
+#--------------------------------------------------------------------
+sub make_package_list {
+	my %mod_pkgs 	= &FetchModsPkgs($Hostname, $Cpu);
+	my %local_pkgs 	= &local_packages;
+	my %linked_pkgs = &linked_packages;
+	my %mods_pkgs_states;
+
+	# Packages in Verdad
+	foreach my $mod (keys %mod_pkgs) {
+		my $package 	= $mod_pkgs{$mod}[0]; 
+		my $md5_hash	= $mod_pkgs{$mod}[1]; # md5 hash from Verdad
+		$package  =~ s/^\s+//g; 
+		$md5_hash =~ s/^\s+//g; 
+
+		$mods_pkgs_states{$mod}{$package} = {	'md5'		=> $md5_hash,
+												'config'	=> 'true',
+												'linked'	=> 'false',
+												'loading'	=> 'false',
+												'complete'	=> 'unknown' };
+	}
+
+	# Packages on disk 
+	foreach my $mod (keys %local_pkgs) {
+		foreach my $pkg_md5 (@{$local_pkgs{$mod}}) {
+			my ($package, $md5_hash) = @$pkg_md5;
+			$package  =~ s/^\s+//g; 
+			$md5_hash =~ s/^\s+//g; 
+
+			if (exists($mods_pkgs_states{$mod}{$package}{'md5'})) {
+				# Package has an md5 in Verdad and on is disk
+				$mods_pkgs_states{$mod}{$package}{'loading'} = $md5_hash;
+				$mods_pkgs_states{$mod}{$package}{'complete'} = 'ondisk';
+			} else {
+				# Package is on disk but there is no md5 in Verdad
+				$mods_pkgs_states{$mod}{$package} = { 'md5'		 => $md5_hash,
+													  'config'	 => 'false',
+													  'linked'	 => 'false',
+													  'loading'	 => 'false',
+													  'complete' => 'unknown' };
+			}
+		}
+	}
+
+	# Pacakges linked
+	foreach my $mod (keys %linked_pkgs) {
+		foreach my $pkg_md5 (@{$linked_pkgs{$mod}}) {
+			my ($package, $md5_hash) = @$pkg_md5;
+			$package  =~ s/^\s+//g; 
+			$md5_hash =~ s/^\s+//g; 
+			
+			if (exists($mods_pkgs_states{$mod}{$package}{'md5'})) {
+				# Pacakge has an md5 in verdad and is on disk and linked
+				$mods_pkgs_states{$mod}{$package}{'linked'} = 'true';
+				$mods_pkgs_states{$mod}{$package}{'loading'} = $md5_hash;
+				$mods_pkgs_states{$mod}{$package}{'complete'} = 'ondisk';
+			} else {
+				# Pacakge has no md5 in verdad but is linked
+				$mods_pkgs_states{$mod}{$package} = { 'md5'		=> $md5_hash,
+													  'config'	=> 'false',
+													  'linked'	=> 'true',
+													  'loading'	=> 'false',
+													  'complete'	=> 'ondisk' };
+			}
+		}
+	}
+
+	return(\%mods_pkgs_states);
+}
+
+#--------------------------------------------------------------------
+# compare_package_list: compares package states
+#--------------------------------------------------------------------
+sub compare_package_list {
+	my $pkgs = shift;
+	my %mods = %{$pkgs};
+
+	foreach my $mod (keys %mods) {
+		for my $pkg ( keys %{ $mods{$mod} } ) {
+			if ($mods{$mod}->{$pkg}{'complete'} eq "ondisk") {
+				# Pkg is in verdad and on disk
+				if ($mods{$mod}->{$pkg}{'md5'} eq $mods{$mod}->{$pkg}{'loading'}) {
+					$mods{$mod}->{$pkg}{'complete'} = 'true';
+				} else {
+					$mods{$mod}->{$pkg}{'loading'} = 'false';
+					$mods{$mod}->{$pkg}{'complete'} = 'false';
+				}
+			} 
+	
+		# some method of determining that a file is in flight will be needed
+			my $pkg_load_status = &inflight($pkg);
+			if ($pkg_load_status == 1) {
+				$mods{$mod}->{$pkg}{'loading'} = 'true';
+				# print "$pkg is IN FLIGHT\n";
+			} else {
+				$mods{$mod}->{$pkg}{'loading'} = 'false';
+			}
+		}
+	}
+	return(\%mods);
+}
+
+#---------------------------------------------------------
+# print_text: prints output for terminal
+#---------------------------------------------------------
+sub print_text {
+	my $pkgs = shift;
+	my %mods_pkgs = %{$pkgs};
+	my %mods;
+
+	my $count = 0;
+	unlink($List) || &log_warn("Unable to remove $List: $!");
+	open(LIST, ">$List") || &log_fatal("Unable to create $List: $!");
+
+	# config, linked, loading, complete
+	# process each module and each pkg for each module
+
+		foreach my $module (sort keys %mods_pkgs) {
+			print $fx{'blue'}, "$module:", $fx{'off'}, "\n";
+	
+		for my $pkg ( sort keys %{ $mods_pkgs{$module} } ) {
+			print "  $pkg: ";
+
+			# Debugging
+# 			print "md5: $mods_pkgs{$module}{$pkg}{'md5'}| ";
+# 			print "config: $mods_pkgs{$module}{$pkg}{'config'}| ";
+# 			print "loading: $mods_pkgs{$module}{$pkg}{'loading'}| ";
+# 			print "linked: $mods_pkgs{$module}{$pkg}{'linked'}| ";
+# 			print "complete: $mods_pkgs{$module}{$pkg}{'complete'}| ";
+
+			if ($mods_pkgs{$module}{$pkg}{'config'} eq 'true') {
+				print $fx{'green'}, "config", $fx{'off'}, " ";
+			} else {
+				print $fx{'red'}, "config", $fx{'off'}, " ";
+			}
+
+			if ($mods_pkgs{$module}{$pkg}{'loading'} eq 'true') {
+				print $fx{'green'}, "loading", $fx{'off'}, " ";
+			} else {
+				print $fx{'yellow'}, "loading", $fx{'off'}, " ";
+			}
+	
+			if ($mods_pkgs{$module}{$pkg}{'linked'} eq 'true') {
+				print $fx{'green'}, "linked", $fx{'off'}, " ";
+			} else {
+				print $fx{'red'}, "linked", $fx{'off'}, " ";
+			}
+	
+			if ($mods_pkgs{$module}{$pkg}{'complete'} eq 'false') {
+				if ($mods_pkgs{$module}{$pkg}{'loading'} eq 'false') {
+					print $fx{'red'};
+				} else {
+					print $fx{'yellow'};
+				}
+				print "complete", $fx{'off'}, " ";
+			} elsif ($mods_pkgs{$module}{$pkg}{'complete'} eq 'unknown') {
+				print $fx{'yellow'}, "complete", $fx{'off'}, " ";
+			} else {
+				print $fx{'green'}, "complete", $fx{'off'}, " ";
+			}
+	
+			print "\n";
+
+			next if ($module eq "unknown");
+
+			# Print to a file the packages that need to be unlinked
+			if (($mods_pkgs{$module}{$pkg}{'config'} eq 'false') && ($mods_pkgs{$module}{$pkg}{'linked'} eq 'true')) {  
+				printf LIST "%-${Module_field_length}s%-${Directive_field_length}s%-${Pkg_field_length}s\n", "$module\:", 'UNLINK', $pkg;
+			} 
+
+			# Print to a file the on-disk packages that need to be linked 
+			# Differentiates between pkgs that match the md5 sig in Verdad
+			if (($mods_pkgs{$module}{$pkg}{'config'} eq 'true') && ($mods_pkgs{$module}{$pkg}{'linked'} eq 'false') && ($mods_pkgs{$module}{$pkg}{'complete'} eq 'true')) {  
+				printf LIST "%-${Module_field_length}s%-${Directive_field_length}s%-${Pkg_field_length}s\n", "$module\:", 'LINK', $pkg;
+				$count++;
+			} elsif (($mods_pkgs{$module}{$pkg}{'config'} eq 'true') && ($mods_pkgs{$module}{$pkg}{'linked'} eq 'false') && ($mods_pkgs{$module}{$pkg}{'complete'} ne 'true')) {  
+				printf LIST "%-${Module_field_length}s%-${Directive_field_length}s%-${Pkg_field_length}s\n", "$module\:", 'LNKNC', $pkg;
+				$count++;
+			}
+			
+			# Print to a file the packages that are loading
+			if (($mods_pkgs{$module}{$pkg}{'loading'} eq 'true') && ($mods_pkgs{$module}{$pkg}{'complete'} eq 'false')) {  
+				printf LIST "%-${Module_field_length}s%-${Directive_field_length}s%-${Pkg_field_length}s\n", "$module\:", 'LOADING', $pkg;
+			}
+		}
+	}
+
+	close(LIST);
+
+	if ($count > $Opts->{'mail_threshold'}) {
+		&Mail;
+	} 
+}
+
+
+#---------------------------------------------------------
+# print_html: prints packages in html
+#---------------------------------------------------------
+sub print_html {
+	my $pkgs = shift;
+	my %mods_pkgs = %{$pkgs};
+	my %mods;
+
+	my $count = 0;
+	unlink($List) || &log_warn("Unable to remove $List: $!");
+	open(LIST, ">$List") || &log_fatal("Unable to create $List: $!");
+
+	# config, linked, loading, complete
+	# process each module and each pkg for each module
+	print "__OUTPUT__\n";
+	foreach my $module (sort keys %mods_pkgs) {
+		print $hx{'blue'}, "$module:", $hx{'off'}, "\n"; 
+
+		for my $pkg ( sort keys %{ $mods_pkgs{$module} } ) {
+			print "  $pkg: ";
+
+			if ($mods_pkgs{$module}{$pkg}{'config'} eq 'true') {
+				print $hx{'green'}, "config", $hx{'off'}, " ";
+			} else {
+				print $hx{'red'}, "config", $hx{'off'}, " ";
+			}
+
+			if ($mods_pkgs{$module}{$pkg}{'loading'} eq 'true') {
+				print $hx{'green'}, "loading", $hx{'off'}, " ";
+			} else {
+				print $hx{'red'}, "loading", $hx{'off'}, " ";
+			}
+	
+			if ($mods_pkgs{$module}{$pkg}{'linked'} eq 'true') {
+				print $hx{'green'}, "linked", $hx{'off'}, " ";
+			} else {
+				print $hx{'red'}, "linked", $hx{'off'}, " ";
+			}
+	
+			if ($mods_pkgs{$module}{$pkg}{'complete'} eq 'false') {
+				if ($mods_pkgs{$module}{$pkg}{'loading'} eq 'false') {
+					print $hx{'red'};
+				} else {
+					print $hx{'yellow'};
+				}
+				print "complete", $hx{'off'}, " ";
+			} elsif ($mods_pkgs{$module}{$pkg}{'complete'} eq 'unknown') {
+				print $hx{'yellow'}, "complete", $hx{'off'}, " ";
+			} else {
+				print $hx{'green'}, "complete", $hx{'off'}, " ";
+			}
+	
+			print "\n";
+
+			next if ($module eq "unknown");
+
+			# Print to a file the packages that need to unlinked
+			if (($mods_pkgs{$module}{$pkg}{'config'} eq 'false') && ($mods_pkgs{$module}{$pkg}{'linked'} eq 'true')) {  
+				printf LIST "%-${Module_field_length}s%-${Directive_field_length}s%-${Pkg_field_length}s\n", "$module\:", 'UNLINK', $pkg;
+			} 
+
+			# Print to a file the packages that need to linked
+			if (($mods_pkgs{$module}{$pkg}{'config'} eq 'true') && ($mods_pkgs{$module}{$pkg}{'linked'} eq 'false') && ($mods_pkgs{$module}{$pkg}{'complete'} eq 'true')) {  
+				printf LIST "%-${Module_field_length}s%-${Directive_field_length}s%-${Pkg_field_length}s\n", "$module\:", 'LINK', $pkg;
+				$count++;
+			} elsif (($mods_pkgs{$module}{$pkg}{'config'} eq 'true') && ($mods_pkgs{$module}{$pkg}{'linked'} eq 'false') && ($mods_pkgs{$module}{$pkg}{'complete'} ne 'true')) {  
+				printf LIST "%-${Module_field_length}s%-${Directive_field_length}s%-${Pkg_field_length}s\n", "$module\:", 'LNKNC', $pkg;
+				$count++;
+			}
+
+			# Print to a file the packages that are loading
+			if (($mods_pkgs{$module}{$pkg}{'loading'} eq 'true') && ($mods_pkgs{$module}{$pkg}{'complete'} eq 'false')) {  
+				printf LIST "%-${Module_field_length}s%-${Directive_field_length}s%-${Pkg_field_length}s\n", "$module\:", 'LOADING', $pkg;
+			}
+		}
+	}
+
+	close(LIST);
+
+	if ($count > $Opts->{'mail_threshold'}) {
+		&Mail;
+	}	
+}
+
+#---------------------------------------------------------
+# inflight: looks for a process moving the pkg in place
+#---------------------------------------------------------
+sub inflight {
+	my $pkg			= shift;
+	my $Loading_dir = "/tools/loading";
+	my $loading_pkg = "$Loading_dir/$pkg";
+
+	if (-d $loading_pkg) {
+		return(1); # package exists in the loading dir, it's in-flight
+	} else {
+		return(0);  
+	}
+}
+
+#--------------------------------------------------------
+# md5: obtains the md5 hash for a package
+#--------------------------------------------------------
+sub md5 {
+    my $pkg         = shift;
+	my $md5_file	= "$Checksums_dir/$pkg-md5";
+
+    if (-e $md5_file) {
+		my $md5;
+		open(MD, "$md5_file") || &log_debug("Unable to open $md5_file: $!"); 
+		while (<MD>) {
+			$md5 = $_;
+		}
+		chomp $md5;
+		close(MD);
+        return($md5);
+    } else {
+        return(1);
+    }
+}
+
+#---------------------------------------------------------
+# Mail: sends mail notfying the NOC to do work
+#---------------------------------------------------------
+sub Mail {
+	open (MAIL, "| /usr/local/sbin/sendmail") || 
+		&log_warn("Unable to execute sendmail: $!");
+
+	my @msg;
+	open(LINK, "$List") || &log_fatal("Unable to open $List: $!");
+	while (<LINK>) {
+		chomp $_;
+		push(@msg, $_);
+	}
+	close(LINK);
+
+	my $msg = join("\n", @msg);
+
+	
+print MAIL<<EOF;
+To: packagesync\@tellme.com
+From: statusd\@$Hostname
+Subject: Attend to packages on $Hostname
+
+$msg
+
+EOF
+
+	close(MAIL);
+	&log_debug("Notified packagesync mailing list via email of host state");
+}
+
+#-----------------------------------------------------
+# interactive: tests whether called interactive or not
+#-----------------------------------------------------
+sub interactive {
+	return -t STDIN && -t STDOUT;
+}
+
+#-------------------------------------------------
+# parse_args: Parses arguments supplied by users
+#-------------------------------------------------
+sub parse_args {
+    my $verdad          = 'verdad';
+    my $result          = 0;
+	my $mail_threshold	= "30";
+    my %opts;
+
+    &Getopt::Long::config("no_getopt_compat", "no_permute");
+    
+    $result = GetOptions(\%opts, qw(debug|d
+                                    help|h
+									mail_threshold|m
+									pretty|p
+                                    verdad|v=s));
+    
+    if (defined($opts{'help'}) || (! $result)) {
+        &HelpMessage;
+    }
+
+    $opts{'verdad'} = $verdad unless defined $opts{'verdad'};
+    $opts{'mail_threshold'} = $mail_threshold unless defined $opts{'mail_threshold'};
+    return(\%opts);
+}   
+
+#--------------------------------------------------
+# HelpMessage - prints the legal options - help info
+#--------------------------------------------------
+sub HelpMessage {
+    print <<"_HELP_";
+$Program version $Version
+Usage: $Program 
+
+-d, --debug     Turn on debug logging.
+-h, --help      Show help and exit.
+-v, --verdad    Specifiy a Verdad server. Default is verdad.
+
+_HELP_
+
+exit(-1);
+}
+
+
+#--------------------------------------------------------------------
+# log_X: logging sub routines
+#--------------------------------------------------------------------
+sub log_fatal {
+    &log("CRIT", @_);
+    exit(-1);
+}
+
+sub log_warn {
+    &log("WARNING", @_);
+}
+
+sub log_debug {
+    &log("NOTICE", @_) if $Opts->{'debug'}; 
+}
+
+sub log {
+    my ($level, $msg) = @_;
+    print "PKGDIFF: $msg\n";
+    # my $logger = "/bin/logger -t $Program -p daemon.$level $msg";
+    # `$logger`;
+}

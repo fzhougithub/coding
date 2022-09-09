@@ -1,0 +1,215 @@
+#!/usr/local/bin/bash
+#Created by Unknown
+#Modified by Vedavyas Kadudas to make it compatible with statusd
+
+function usage {
+	echo "	Usage: check-lbstatus-app <context-name> <loadbalancer> <level> <database host>"
+    echo "		context-name  -  The app that needs to be checked"
+    echo "		loadbalancer  -  The SLB hostname. e.g. slb01.iic1.pool.sv1.tellme.com"
+    echo "		level         -  Just set it to 1"
+    echo "		database-host -  The database host from which to get threshold values. e.g. db01.iic1.pool.sv1.tellme.com"
+}
+
+help=$(grep "^## " "${BASH_SOURCE[0]}" | cut -c 4-)
+
+
+flag=-1					# return value (this is what Statusd uses for STATUS) -1(UNKNOWN) 0(OK), 1 (WARNING) or 2 (CRITICAL)
+stat=OK					# return message of overall status which Netcool will display in the interface
+LB_SERV=$1				# name of load balancer to be checked
+CONTEXT=$2				# application (e.g. /ups)
+LEVEL=$3				# Not required. Leaving it on place
+USER="cemonitor"				# user name
+PASSWD="fqjInrHU"			# password
+SUMMARY_MSG=				# return message of each app server status which Netcool will display in the interface
+DATABASE=$4				# database used for threshold values (999 = backend is in maintenance)
+CURL="/usr/bin/curl --connect-timeout 10 --max-time 10 --silent"
+has_Threshold=0				# if there is no threshold value, do not perform the check
+MYSQL="mysql -u ve -h $DATABASE ve"	# mysql connection string
+
+#if [ $1 == "-h" || $1 == "--help" || $# -ne 4 ];then
+if [ "$#" -ne 4 ]; then
+	usage
+	exit -1
+fi
+
+
+# verify if threshold value exists and if backend is in known maintenance window
+
+function maintenance {
+
+	SQL_QUERY=`cat <<+
+	Select backend_red, lease   
+	from threshold where application = '/${CONTEXT}' and id =
+	(select if ((select max(id) from threshold where application = '/${CONTEXT}' and dow = dayofweek(now()) and time <= now()),
+	(select id from threshold where application = '/${CONTEXT}' and dow = dayofweek(now()) and time = (select max(time)
+	from threshold where application = '/${CONTEXT}' and dow = dayofweek(now()) and time <= now())),
+	(select id from threshold where application = '/${CONTEXT}' and dow = (select if (dayofweek(now()) = 1,7,
+	(select max(dow) from threshold where application = '/${CONTEXT}' and dow < dayofweek(now())))) and time =
+	(select max(time) from threshold where application = '/${CONTEXT}' and dow =
+	(select if (dayofweek(now()) = 1,7,(select max(dow) from threshold where application = '/${CONTEXT}' and dow < dayofweek(now()))))))
+	));`
+
+	# execute query
+	SQL_RETURN=(`echo "$SQL_QUERY" | ${MYSQL} 2>&1 `)
+
+	# put into a variables
+	BCK_RED=${SQL_RETURN[2]}
+	LEASE=${SQL_RETURN[3]}
+
+	if [ "$BCK_RED" = "NULL" -o "$BCK_RED" = "" ] ; then 			# flag that prevent processing if there is no threshold entry
+		has_Threshold=1
+	fi
+}
+
+# appStatus gets passed the name of the server an app is deployed on and retrieves the status from monitor/text
+
+function appStatus {
+
+	STATUS=`/opt/voxify/bin/lbctl --host $LB_SERV --user $USER --passwd $PASSWD host $SERVER | awk -F\  '{ print $1 }'` > /dev/null 2>&1
+
+	if [ $STATUS == "RUNNING" ]; then
+       		$CURL http://${SERVER}/${CONTEXT}/monitor/text
+	else
+		echo "GREEN"
+	fi
+}
+
+# servers retrieves all the servers an app is deployed on 
+
+function servers {
+
+	SERV_ARRAY=`/opt/voxify/bin/lbctl --host $LB_SERV --user $USER --passwd $PASSWD app ${CONTEXT}`	# determine which servers are running the application
+        SERV_STATUS=`$CURL $USER:$PASSWD@$LB_SERV':7081/?cmd=Status&server.apps=false'`			# check if any server is shutdown (indicates a redeploy in progress)
+
+	case "$SERV_STATUS" in										# set redeploy flag 0=shutdown 1=all are running
+		*SHUTDOWN*)
+			DEPLOY_STATE=0
+			;;
+		*)
+			DEPLOY_STATE=1
+			;;
+	esac
+}
+
+# sname returns only hostname from FQDN for better presentation 
+
+function sname {
+
+	echo $SERVER |awk -F\: '{ print $1 }' | awk -F\. '{ print $1 }'
+}
+
+function checkThreshold {
+
+	SERVER_COUNT=0								# number of servers app is deployed
+
+	for SERVER in $SERV_ARRAY; do						# each app server could be in a different state so run for each server app is deployed on
+		let "SERVER_COUNT += 1"
+
+		if [ "$has_Threshold" -eq 0 ] && [ "$LEASE" -gt 0 ] ; then	# only run if there are threshold entries and app uses lease monitor
+			checkStat
+		else								# it could be no no threshold values, or no lease monitor
+			SUMMARY_MSG="$SUMMARY_MSG `sname`"
+
+		fi
+	done
+
+	if [ "$has_Threshold" -eq 1 ] ; then			# if no threshold values
+		SUMMARY_MSG="$SUMMARY_MSG [no threshold values]"
+	else							# else it must not have a lease monitor
+		if [ "$LEASE" -eq 0 ] ; then 
+			SUMMARY_MSG="$SUMMARY_MSG [no lease monitor]"
+		fi
+	fi
+
+	case "$SERVER_COUNT" in							# zero servers is caught at end of script
+		1)
+			SUMMARY_MSG=" Deployed on $SERVER_COUNT server$SUMMARY_MSG"	# deployed on exactly one server
+			stat="WARNING"
+
+			if [ $DEPLOY_STATE -eq 0 ] ; then			# if redeploy in progress, set message but leave return flag Green so it doesn't email
+				stat="UNKNOWN [server redeploy in progress]"
+				flag=0
+			else
+				stat="WARNING"
+				flag=1
+			fi
+			;;
+		*)								# deployed on more than one server
+			flag=$flag						# leaves the return flag set to null
+			stat=$stat						# leaves the return message set to OK
+			;;
+	esac
+}
+
+# if all preflight checks pass, check each server that the app is deployed on
+
+function checkStat  {
+
+	if [ $BCK_RED -lt 999 ]; then						# 999 assumes backend maintenance is currently happening
+		S_NAME=`sname`
+		CURR=`appStatus`
+
+		case "$CURR" in
+			GREEN*)
+				SUMMARY_MSG="$SUMMARY_MSG $S_NAME:OK"
+				flag=$flag
+				stat=$stat
+				;;
+			*YELLOW:CRITICAL*)					# Yellow:critical must come before yellow otherwise case picks up yellow first
+				SUMMARY_MSG="$SUMMARY_MSG $S_NAME:CRITICAL"
+				flag=2
+				stat="CRITICAL"
+				;;
+			*YELLOW*)
+				if [ $LEVEL -eq 0 ] || [ $LEASE -eq 1 ]; then	# level 0 means don't page, lease 1 means implementation of new lease monitor which can go yellow critical
+					SUMMARY_MSG="$SUMMARY_MSG $S_NAME:WARNING"
+					if [ $flag -ge 1 ]; then		# if flag is already set above green level leave it at the highest setting
+						flag=$flag
+						stat=$stat
+					else					# if flag is set at green level set it to warning
+						flag=1	
+						stat="WARNING"
+					fi
+				else
+					SUMMARY_MSG="$SUMMARY_MSG $S_NAME:CRITICAL"	# if old implementation of lease monitor (doesn't go yellow:critical) assume it's critical
+					flag=2
+					stat="CRITICAL"
+				fi
+				;;
+			*RED*)							# lease monitor can never turn red, but this included should lease monitor ever change
+				SUMMARY_MSG="$SUMMARY_MSG $S_NAME:CRITICAL"
+				flag=2
+				stat="CRITICAL"
+				;;
+			*)
+				SUMMARY_MSG="$SUMMARY_MSG $S_NAME:CRITICAL"		# unknown state, assume critical
+				if [ $flag -eq 2 ]; then
+					flag=$flag
+					stat=$stat
+				else
+					flag=2
+					stat="CRITICAL"
+				fi
+				;;
+		esac
+
+	else
+		SUMMARY_MSG="Check not performed during standing maintenance window"
+		flag=$flag
+		stat=$stat
+	fi
+}
+
+servers > /dev/null 2>&1
+
+if [ -z  "$SERV_ARRAY" ]; then
+	DC_NAME=`echo $LB_SERV | awk -F\- '{ print $1 }'`
+	echo "Status:CRITICAL $CONTEXT is not Deployed under $LB_SERV"
+echo "$SQL_RETURN"
+	exit 2
+else
+	maintenance
+	checkThreshold> /dev/null 2>&1
+	echo "Status:$stat$SUMMARY_MSG"
+	exit $flag
+fi

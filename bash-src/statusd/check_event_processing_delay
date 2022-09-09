@@ -1,0 +1,86 @@
+#/bin/bash 
+##sh script.sh InteractionMessageEvent,InteractionStateEvent,AgentSessionEvent 2000000 "Pushing chronos event to Stream Handler" ./logfile.log
+###[2015-12-29 03:35:41,306]  INFO [L:com.tfsc.ilabs.chronos.queue.stream.impl.ChronosQueueStreamConsumer T:'pool-356-thread-7' I: IS: TR:STARTUP SQ:41047 ND:]  - Pushing chronos event to Stream Handler. ClientID:nemo-client-capitalone StreamID:nemo-client-capitaloneva1exitsurvey-event-handlerOEEvent PartitionID:2 CorrelationId:724a42a7-68ad-43fe-abe3-d485f67749ce eventRaisedTime 1,451,359,836,403
+eventTypes=$1
+cThreshold=$2
+wThreshold=$3
+logstmt=$4
+filepath=$5
+
+
+eventType=(${eventTypes//,/ })
+
+criticalTypes=
+
+##status
+_OK=0
+_WARNING=1
+_CRITICAL=2
+status=$_OK
+criticalCount=1
+wCount=1;
+
+for i in "${eventType[@]}"
+do
+        log=`grep "$logstmt.*$i.*.eventRaisedTime.*" $filepath |  tail  -2 | head -1`
+        if [ ! -z "$log" -a "$log"!=" " ]; then
+
+                eventRaisedTime=`echo $log | grep -o "eventRaisedTime.*" | cut -d' ' -f2 | tr -d ','`
+                logDate=`echo $log | cut -d']' -f1 | cut -d'[' -f2`
+                eventProcessedTime=`date --date="$logDate" +%s%3N`
+
+                diff=`expr $eventProcessedTime - $eventRaisedTime`
+
+                 if [ "$diff" -ge "$cThreshold" ]; then
+                        status=$_CRITICAL
+                        criticalTypes[$criticalCount]="$i is processed with a lag of $diff milliseconds"
+                        criticalLogs[$criticalCount]=$log
+                        criticalCount=$((criticalCount+1))
+
+                 elif [ "$diff" -ge "$wThreshold" ]; then
+						 status=$_WARNING
+                        criticalTypes[$wCount]="$i is processed with a lag of $diff milliseconds"
+                        criticalLogs[$wCount]=$log
+                        wCount=$((wCount+1))
+                fi
+        else
+                if [ "$i" == "InteractionStateEvent" ]; then
+                         status=$_CRITICAL
+                fi
+                 criticalTypes[$criticalCount]="$i is not processed in the current hour"
+                 criticalLogs[$criticalCount]="Log Not Available for eventType: $i"
+                 criticalCount=$((criticalCount+1))
+        fi
+done
+
+
+if [ "$status" == "$_CRITICAL" ]; then
+        echo "CRITICAL: The event is not being processed or being processed with a lag beyond the configured time"
+        echo "__OUTPUT__"
+                for i in "${criticalTypes[@]}"
+                do
+                         echo $i
+                done
+                echo "__DATA__"
+                for i in "${criticalLogs[@]}"
+                do
+                         echo $i
+                done
+elif [ "$status" == "$_WARNING" ]; then
+        echo "WARNING: Events of one or more type are processed for $warningThreshold milliseconds"
+        echo "__OUTPUT__"
+                for i in "${criticalTypes[@]}"
+                do
+                         echo $i
+                done
+                echo "__DATA__"
+                for i in "${criticalLogs[@]}"
+                do
+                         echo $i
+                done
+
+else
+        echo "OK: Events are processed with expected delay of less than $wThreshold milliseconds"
+fi
+
+exit $status

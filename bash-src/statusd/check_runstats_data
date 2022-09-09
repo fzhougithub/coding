@@ -1,0 +1,178 @@
+#!/bin/bash
+#---------------------------------------------------------------------------------------------------------------------------------------
+# Changes done to validate if Memory utilization has gone above limit
+#---------------------------------------------------------------------------------------------------------------------------------------
+appname=
+servertype=
+maxval=
+logdirectory=
+parameter=
+current_date=
+time=
+folder=
+inp_folder=
+warning=
+critical=
+status=0
+result=
+detail=
+DC=
+
+function get_dc  {
+	tmp=$(hostname)
+	if [[ $tmp == *\.staging.sv1\.* ]]
+	then
+		DC="sv1stage"
+	elif [[ $tmp == *\.staging.va1\.* ]]
+	then
+		DC="va1stage"
+	elif [[ $tmp == *\.va1\.* ]]
+	then
+		DC="va1"
+	elif [[ $tmp == *\.sv1\.* ]]
+	then
+		DC="sv1"
+	elif [[ $tmp == *\.sv2\.* ]]
+	then
+		DC="sv2"
+	else
+		status=2
+		summary="Invalid Inputs"
+		detail="unable to identify dc"
+		print_usage	
+	fi	
+}
+
+function folder_doesnot_exist {
+	#----TODO check if files are getting generated
+	if [ "${time}" == "00" ] 
+	then
+		print_result	
+	else
+		prevday=1
+		prevday=$((time - prevday ))
+		printf -v time "%02d" $prevday
+		folder=$(echo ${logdirectory}"/"${current_date}"/"${time})	
+		if [ -d $folder ]
+		then
+			inp_folder=${folder}
+			check_data 	
+		else
+			status=2
+			detail="File not found in ${logdirectory}"
+			print_usage	
+		fi
+	fi  
+	
+	exit 0
+}
+
+function print_usage {
+	echo "Invalid Inputs:"${detail}
+	echo "__OUTPUT__"
+	echo "
+	USAGE
+	check_runstats_data -l "/var/tellme/assist/ftp/va1/assist/assist_appglobal/app_run_stats_logs/histo" -p HISTO -a APPGLOBAL -s config-app -x '3096' -w 75 -c 90
+	-l -> the base path of run stats the log directory 
+	-p ->  Parameter being validated, valid values HISTO 
+	-a ->  The app name , example: APPGLOBAL/NS/LOGARCHIVER
+	-s ->  The prefix of the hostname  , example: config-app/coreapps/checkavail-app
+	-x ->  The maximum value allowed, in case of HISTO it is the XmX value  for memory
+	-w ->  the warning limit set
+	-c ->  the critical limit set
+	"
+	exit -1
+	
+}
+function print_result {
+	if [ ${status} -eq 2 ]
+	then
+		echo "Metrics above limit"
+		echo "__OUTPUT__"
+		echo ${detail}
+
+	elif [ ${status} -eq 1 ]
+	then
+		echo "Metrics above limit"
+		echo "__OUTPUT__"
+		echo ${detail}
+	else
+		echo "Metrics within limit"
+	
+	fi
+	exit ${status}
+}
+function validate_result {
+	if [ ${result} -ge ${critical} ]
+	then
+		status=2
+		detail=${detail}"/CRITICAL $parameter - $appname  $ [ ${result} >= ${critical} ]"$(echo ${loc_file} | sed "s/^.*${servertype}/${servertype}/g" |sed "s/.net.*$/.net/g") 
+		
+	elif [ ${result} -ge ${warning} ]
+	then
+		if [ ${status} -ne 2 ]
+		then 
+			status=1
+		fi
+		detail=${detail}"/WARNING $parameter - $appname [ ${result} >= ${warning} ]"$(echo ${loc_file} | sed "s/^.*${servertype}/${servertype}/g" |sed "s/.net.*$/.net/g") 
+	fi
+}
+
+function check_data {
+	for loc_file in $(ls ${inp_folder}/*${appname}*)
+	do
+		if [ ${parameter} == "HISTO" ]
+		then 
+			value=$(zgrep ^Total ${loc_file})
+			arr=($value)
+			result=$(((arr[2]/10000)/maxval))	
+		fi
+		validate_result
+	done		
+	print_result
+}
+
+
+function process_data {
+
+	get_dc
+	logdirectory=${logdirectory/'_dc_'/$DC}	
+	current_date=$(date +'%Y-%m-%d')
+	time=$(date +'%H')
+	folder=$(echo ${logdirectory}"/"${current_date}"/"${time})	
+	if [ -d $folder ]
+	then
+		inp_folder=${folder}
+		check_data 	
+	else
+		folder_doesnot_exist
+	fi
+}
+function validate_data {
+( [ "${logdirectory}" == "" ]) && detail=" LogDirectory doesnot exist" && print_usage
+( [ "${parameter}" == "" ]) && detail="parameter doesnot exist" && print_usage
+( [ "${appname}" == "" ]) && detail="appname doesnot exist" && print_usage
+( [ "${servertype}" == "" ]) && detail="servertype doesnot exist" && print_usage
+( [ "${maxval}" == "" ]) && detail="maxval doesnot exist "&& print_usage
+( [ "${warning}" == "" ]) && detail="warning doesnot exist" && print_usage
+( [ "${critical}" == "" ]) && detail="critical doesnot exist" && print_usage
+
+}
+
+while getopts "l:p:a:s:x:w:c:h" OPT;do
+	case $OPT in
+		"l") logdirectory=${OPTARG};;
+		"p") parameter=${OPTARG};;
+		"a") appname=${OPTARG};;
+		"s") servertype=${OPTARG};;
+		"x") maxval=${OPTARG};;
+		"w") warning=${OPTARG};;
+		"c") critical=${OPTARG};;
+	esac
+done
+#logdirectory="/var/tellme/assist/ftp/va1/assist/assist_appglobal/app_run_stats_logs/histo"
+#appname=APPGLOBAL
+#maxval=3096
+
+validate_data
+process_data

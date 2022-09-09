@@ -1,0 +1,37 @@
+#!/usr/local/bin/bash
+#curl -s -L -k -x http://cache.private.va1.tellme.com:3128 -u "xxx@yyyc.com:Letmein123@" -H "App-Key: m0uoap32k87euw636k3y9mv8cqubpf2r" -X GET https://api.pingdom.com/api/2.0/checks |python -mjson.tool|sed 's/,//g'|sed 's/"//g'|grep 'name\|status'|grep -v '_name\|hostname'|cut -d":" -sf 2|sed 's/ //g' |awk 'NR%2==1 {prev=$0} NR%2==0 {print prev " is " $0} END {if (NR%2==1) {print $0 ":"}}' > /var/tmp/pingdata
+
+curl -s -L -k -x http://xxxxxx.net:3128 -u "aaa@uuuuuuu.com:Letmein123@" -H "App-Key: m0uoap32k87euw636k3y9mv8cqubpf2r" -X GET https://api.pingdom.com/api/2.0/checks |python -mjson.tool|sed 's/,//g'|sed 's/"//g'|grep -v acktimeout |grep -v alert|grep -v autoresolve|grep -v created|grep -v id|grep -v last|grep -v resolution|grep -v tags|grep -v type|grep -v legacy|grep -v hostname|grep -v {|grep -v }|grep -v ]|grep -v "\["|cut -d":" -sf 2|sed 's/ //g' |awk 'NR%2==1 {prev=$0} NR%2==0 {print prev " is " $0} END {if (NR%2==1) {print $0 ":"}}' > /var/tmp/pingdata
+
+while read line
+do
+        echo $line|grep "down" >> /var/tmp/down.out
+done < /var/tmp/pingdata
+
+if [ -s /var/tmp/down.out ]
+then
+        clinm=""
+        while read line; do j=`echo $line|cut -d " " -sf 1`; echo -n "$j," >> /var/tmp/clinames.out; done < /var/tmp/down.out
+        clinm=`cat /var/tmp/clinames.out`
+        echo "CRITICAL: PINGDOM alerts for : $clinm"
+        echo "__OUTPUT__"
+        cat /var/tmp/down.out 1>&2
+        rm -rf /var/tmp/pingdata /var/tmp/down.out /var/tmp/clinames.out
+        exit 2
+else
+        echo "OK: No PINGDOM alerts"
+        echo "__OUTPUT__"
+        cat /var/tmp/pingdata 1>&2
+        rm -rf /var/tmp/pingdata /var/tmp/down.out
+        exit 0
+fi
+# set cleanup trap
+
+# cleanup
+# unset proxy settings and delete tmp/installer files
+cleanup ()
+{
+  rm -rf /var/tmp/pingdata /var/tmp/output.out /var/tmp/pingdata /var/tmp/down.out /var/tmp/output.out /var/tmp/clinames.out
+}
+#end of script
+trap cleanup INT TERM EXIT SIGHUP SIGINT SIGQUIT SIGTERM

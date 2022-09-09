@@ -1,0 +1,234 @@
+#!/usr/local/bin/bash 
+##################################################
+### Scriptname: chech_mtr                      ###
+### Purpose: Raise alert in case of significant###
+###                     packet loss            ###
+### Author: Umesh Rege                         ###
+### Date: 17th June, 2014                      ###
+##################################################
+
+
+trap 'cleanup' INT TERM EXIT SIGHUP SIGINT SIGQUIT SIGTERM
+
+case "$1" in
+h|"-h"|help)
+echo "This script is working as statusd alert."
+echo "This alert checks for packet loss for each mtr trace configured in /var/log/captures path on ops01 servers"
+echo "Based on the configuration it will generate the CRITICAL or NORMAL events on Netcool"
+echo "Usage: ./check_mtr"
+;;
+*)
+;;
+esac
+fr_loop() {
+count=0
+for i in `cat /var/log/captures/$zz/mtr|grep -v To|grep -v PDT|grep -v HOST|tail -$lines|sed '/^$/d'|grep -v "???"|awk -F" " '{print $3}'|cut -d"." -sf 1`
+do
+
+if [ $i -ne "0" ]
+then
+        count=`expr $count + 1`
+fi
+done
+if [ $count -gt $yy ]
+then
+        echo "`echo $zz|tr '[:lower:]' '[:upper:]'`" >> /var/tmp/crit.out
+        echo "`echo $zz|tr '[:lower:]' '[:upper:]'`" >> /var/tmp/critout.out
+        cat /var/log/captures/$zz/mtr|grep -v To|grep -v PDT|grep -v HOST|tail -$lines|sed '/^$/d' >> /var/tmp/critout.out
+        echo "====================" >> /var/tmp/critout.out
+else
+        echo "`echo $zz|tr '[:lower:]' '[:upper:]'`" >> /var/tmp/okout.out
+        cat /var/log/captures/$zz/mtr|grep -v To|grep -v PDT|grep -v HOST|tail -$lines|sed '/^$/d' >> /var/tmp/okout.out
+        echo "====================" >> /var/tmp/okout.out
+fi
+}
+#cd /var/log/captures
+for zz in `ls /var/log/captures`
+do
+case "$zz" in
+archive)
+;;
+hartford-ia)
+    zz=hartford-ia
+    lines=15
+        yy=4
+    fr_loop
+;;
+aa-lostbaggage)
+    zz=aa-lostbaggage
+    lines=12
+        yy=4
+    fr_loop
+;;
+ford-inrix-seattle)
+    zz=ford-inrix-seattle
+    lines=11
+        yy=4
+    fr_loop
+;;
+cwda-allen)
+    zz=cwda-allen
+    lines=10
+        yy=4
+    fr_loop
+;;
+ops01.service.va1)
+    zz=ops01.service.va1
+    lines=4
+        yy=1
+    fr_loop
+;;
+ml-teleport)
+    zz=ml-teleport
+    lines=15
+        yy=4
+    fr_loop
+;;
+ford-volt-wallington-vpn)
+    zz=ford-volt-wallington-vpn
+    lines=12
+        yy=4
+    fr_loop
+;;
+cwda-bothell)
+    zz=cwda-bothell
+    lines=10
+        yy=4
+    fr_loop
+;;
+voxify-beaverton-apps2)
+    zz=voxify-beaverton-apps2
+    lines=8
+        yy=3
+    fr_loop
+;;
+ford-inrix-denver)
+    zz=ford-inrix-denver
+    lines=7
+        yy=3
+    fr_loop
+;;
+mellon-vpn)
+    zz=mellon-vpn
+    lines=13
+        yy=4
+    fr_loop
+;;
+hartford-group)
+    zz=hartford-group
+    lines=10
+        yy=4
+    fr_loop
+;;
+assist-agents-manila1)
+    zz=assist-agents-manila1
+    lines=7
+        yy=3
+    fr_loop
+;;
+hewitt-lisle-att)
+    zz=hewitt-lisle-att
+    lines=11
+        yy=4
+    fr_loop
+;;
+voxify-sunnyvale-apps1)
+    zz=voxify-sunnyvale-apps1
+    lines=7
+        yy=3
+    fr_loop
+;;
+voxify-ual-chicago)
+    zz=voxify-ual-chicago
+    lines=11
+        yy=4
+    fr_loop
+;;
+hewitt-mesa-att)
+    zz=hewitt-mesa-att
+    lines=13
+        yy=4
+    fr_loop
+;;
+assist-agents-bangalore-hyderabad)
+    zz=assist-agents-bangalore-hyderabad
+    lines=10
+        yy=4
+    fr_loop
+;;
+fidelity)
+    zz=fidelity
+    lines=7
+        yy=3
+    fr_loop
+;;
+ford-volt-orange-vpn)
+    zz=ford-volt-orange-vpn
+    lines=9
+        yy=3
+    fr_loop
+;;
+resolvity-dallas-01-gw)
+    zz=resolvity-dallas-01-gw
+    lines=10
+        yy=4
+    fr_loop
+;;
+aa-ivr)
+    zz=aa-ivr
+    lines=15
+        yy=4
+    fr_loop
+;;
+assist-agents-manila2)
+    zz=assist-agents-manila2
+    lines=11
+        yy=4
+    fr_loop
+;;
+resolvity-dallas-02-gw)
+    zz=resolvity-dallas-02-gw
+    lines=5
+        yy=2
+    fr_loop
+;;
+ml-pennsylvania)
+    zz=ml-pennsylvania
+    lines=16
+        yy=4
+    fr_loop
+;;
+esac
+done
+#cd -
+##############Alert Setup################
+if [ -s /var/tmp/critout.out ]
+then
+        clinm=""
+        while read line; do j=`echo $line`; echo -n "$j," >> /var/tmp/clinms.out; done < /var/tmp/crit.out
+        clinm=`cat /var/tmp/clinms.out`
+        echo "CRITICAL: Significant packet loss observed for: $clinm"
+        echo "__OUTPUT__"
+        cat /var/tmp/critout.out 1>&2
+        rm -rf /var/tmp/crit.out /var/tmp/critout.out /var/tmp/okout.out /var/tmp/clinms.out
+        exit 2
+else
+        echo "OK: No significant packet loss is observed"
+        echo "__OUTPUT__"
+        cat /var/tmp/okout.out 1>&2
+        rm -rf /var/tmp/crit.out /var/tmp/critout.out /var/tmp/okout.out /var/tmp/clinms.out
+        exit 0
+fi
+
+##################################################################################
+# set cleanup trap
+
+# cleanup
+# unset proxy settings and delete tmp/installer files
+cleanup ()
+{
+  rm -rf /var/tmp/crit.out /var/tmp/critout.out /var/tmp/okout.out /var/tmp/clinms.out
+}
+#end of script
+#trap cleanup INT TERM EXIT SIGHUP SIGINT SIGQUIT SIGTERM
+##################################################################################

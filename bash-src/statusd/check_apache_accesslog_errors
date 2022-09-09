@@ -1,0 +1,35 @@
+#!/bin/bash 
+_OK=0
+_WARN=1
+_CRITICAL=2
+DATE=`date '+%H'`
+
+count=0
+critical=0
+warning=0
+
+#warning
+warning=$1
+
+#critical
+critical=$2
+#file_path
+file_path=$3
+#file_name
+file_name=$4
+
+
+cd $file_path
+ACCESS_LOG=`ls -tr | grep $file_name | tail -1`
+count=`awk '{print $9}' $file_path/$ACCESS_LOG|grep "[3-5]\{1\}[0-9]\{2\}"| wc -l`
+
+if [ "$count" -gt "$critical" ] ; then
+  echo "CRITICAL: Count is $count, going beyond $critical for hour - $DATE"
+  exit $_CRITICAL
+elif [ "$count" -gt "$warning" ] ; then
+ echo "WARNING: Count is $count going beyond $warning for hour - $DATE"
+ exit $_WARN
+else
+ echo "OK:Count is $count, normal for hour - $DATE"
+ exit $_OK
+fi

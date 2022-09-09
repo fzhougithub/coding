@@ -1,0 +1,721 @@
+#!/bin/bash
+
+# Usage
+# check-ve-app.sh <datacenter name> <context> <database name> <locale>
+#
+# datacenter: name must be one of Voxify's datacenters i.e apps1.voxify.com
+# context: must be one of the production apps i.e. co-fare
+# database: name must be one of the current production databases
+# locale: specific locale to monitor     #added by jduay 03.03.2015
+
+
+declare -a apps
+declare -a server
+
+flag=0
+
+DATACENTER=$1
+CONTEXT=$2
+DATABASE=$3	# database used for threshold values (999 = backend is in maintenance)
+LOCALE=$4      # added by jduay 03.03.2015 - locale to monitor - for ABG, possible values are en_US, es_US, fr_CA,en_AU, en_NZ, en_GB
+
+num_calls=19  # used for duration calculation.  19 is normal, 39 is holiday (double the duration)
+
+CNT=0
+Y_ERR=0
+R_ERR=0
+
+msg_java=""
+msg_bkend=""
+msg_transfer=""
+msg_ad1=""
+msg_ad2=""
+msg_ad3=""
+msg_cv=""
+msg_compose=""
+msg_data=""
+add_space=0
+
+R_java=0
+R_bkend=0
+R_transfer=0
+R_ad1=0
+R_ad2=0
+R_ad3=0
+R_cv=0
+
+Y_java=0
+Y_bkend=0
+Y_transfer=0
+Y_ad1=0
+Y_ad2=0
+Y_ad3=0
+
+WebApp=0
+has_Threshold=0
+has_Duration=0
+
+overall_status="Ok"
+java_status="Ok" 
+backend_status="Ok" 
+transfer_status="Ok" 
+cv_status="Ok" 
+ad1_status="Ok" 
+ad2_status="Ok" 
+ad3_status="Ok" 
+
+GROUP_VAR="\`group\`"
+GROUP_VAR2="qualifier"
+MYSQL_USER=monitor
+MYSQL_PASS=monitor
+MYSQL="mysql -Bs -u$MYSQL_USER -p$MYSQL_PASS -h $DATABASE ve"
+
+### Begin Functions ###
+
+function getThreshold() {
+     #Query for exceptions and backend errors thresholds
+
+     SQL_QUERY=`cat <<+
+     Select duration, alarm, except_yellow, except_red, backend_yellow, backend_red, cv_duration_short, cv_duration_long, callvol_short, callvol_long, ad1_type, ad1_yellow, ad1_red, ad2_type, ad2_yellow, ad2_red, ad3_type, ad3_yellow, ad3_red, transfer_yellow, transfer_red  
+     from threshold where application = '/${CONTEXT}' and ${GROUP_VAR2} = '${LOCALE}' and id =
+     (select if ((select max(id) from threshold where application = '/${CONTEXT}' and ${GROUP_VAR2} = '${LOCALE}' and dow = dayofweek(now()) and time <= now()),
+     (select id from threshold where application = '/${CONTEXT}' and ${GROUP_VAR2} = '${LOCALE}' and dow = dayofweek(now()) and time = (select max(time)
+     from threshold where application = '/${CONTEXT}' and ${GROUP_VAR2} = '${LOCALE}' and dow = dayofweek(now()) and time <= now())),
+     (select id from threshold where application = '/${CONTEXT}' and ${GROUP_VAR2} = '${LOCALE}' and dow = (select if (dayofweek(now()) = 1,7,
+     (select max(dow) from threshold where application = '/${CONTEXT}' and ${GROUP_VAR2} = '${LOCALE}' and dow < dayofweek(now())))) and time =
+     (select max(time) from threshold where application = '/${CONTEXT}' and ${GROUP_VAR2} = '${LOCALE}' and dow =
+     (select if (dayofweek(now()) = 1,7,(select max(dow) from threshold where application = '/${CONTEXT}' and ${GROUP_VAR2} = '${LOCALE}' and dow < dayofweek(now()))))))
+     ));`
+
+     # execute query
+     SQL_RETURN=(`echo "$SQL_QUERY" | ${MYSQL} 2>&1 `)
+
+     # put into a variables
+     TDURATION=${SQL_RETURN[0]}
+     MIN_SAMPLE=${SQL_RETURN[1]}
+     EXC_YELLOW=${SQL_RETURN[2]}
+     EXC_RED=${SQL_RETURN[3]}
+     BCK_YELLOW=${SQL_RETURN[4]}
+     BCK_RED=${SQL_RETURN[5]}
+     INTERVAL=${SQL_RETURN[6]}
+     INTERVAL_LONG=${SQL_RETURN[7]}
+     MIN_CALLS_SHORT=${SQL_RETURN[8]}
+     MIN_CALLS_LONG=${SQL_RETURN[9]}
+     AD1_TYPE=${SQL_RETURN[10]}
+     AD1_YELLOW=${SQL_RETURN[11]}
+     AD1_RED=${SQL_RETURN[12]}
+     AD2_TYPE=${SQL_RETURN[13]}
+     AD2_YELLOW=${SQL_RETURN[14]}
+     AD2_RED=${SQL_RETURN[15]}
+     AD3_TYPE=${SQL_RETURN[16]}
+     AD3_YELLOW=${SQL_RETURN[17]}
+     AD3_RED=${SQL_RETURN[18]}
+     TRANSFER_YELLOW=${SQL_RETURN[19]}
+     TRANSFER_RED=${SQL_RETURN[20]}
+
+     if [ "$TDURATION" = "NULL" -o "$TDURATION" = "" ] ; then          # flag that prevent processing if there is no threshold entry
+          has_Threshold=1
+     fi
+
+     msg_data="\n__DATA__\nTDURATION=$TDURATION\nMIN_SAMPLE=$MIN_SAMPLE\nEXC_YELLOW=$EXC_YELLOW\nEXC_RED=$EXC_RED\nBCK_YELLOW=$BCK_YELLOW\nBCK_RED=$BCK_RED\nINTERVAL=$INTERVAL"
+     msg_data="${msg_data[@]}\nINTERVAL_LONG=$INTERVAL_LONG\nMIN_CALLS_SHORT=$MIN_CALLS_SHORT\nMIN_CALLS_LONG=$MIN_CALLS_LONG\nAD1_TYPE=$AD1_TYPE\nAD1_YELLOW=$AD1_YELLOW"
+     msg_data="${msg_data[@]}\nAD1_RED=$AD1_RED\nAD2_TYPE=$AD2_TYPE\nAD2_YELLOW=$AD2_YELLOW\nAD3_TYPE=$AD3_TYPE\nAD3_YELLOW=$AD3_YELLOW\nAD3_RED=$AD3_RED\nTRANSFER_YELLOW=$TRANSFER_YELLOW"
+     msg_data="${msg_data[@]}\nTRANSFER_RED=$TRANSFER_RED"
+}
+     
+
+function getDuration() {
+     #Query to calculate average duration over the past 3 weeks
+
+     SQL_QUERY=`cat <<+
+     (SELECT quanta_begin, TIMESTAMPDIFF(MINUTE,quanta_begin,DATE_SUB(NOW(), INTERVAL (1440*7) MINUTE)) AS diff 
+     FROM ve.monitoring FORCE INDEX (quanta_begin) 
+     WHERE quanta_begin BETWEEN DATE_SUB(NOW(), INTERVAL ((1440*7)+1440) MINUTE) AND DATE_SUB(NOW(), INTERVAL (1440*7) MINUTE) 
+     AND ${GROUP_VAR} = '${LOCALE}' AND application = '/${CONTEXT}'
+     AND total_calls > 0 
+     ORDER BY 1 DESC LIMIT ${num_calls},1)
+     UNION ALL 
+     (SELECT quanta_begin, TIMESTAMPDIFF(MINUTE,quanta_begin,DATE_SUB(NOW(), INTERVAL (1440*14) MINUTE)) AS diff 
+     FROM ve.monitoring FORCE INDEX (quanta_begin) 
+     WHERE quanta_begin BETWEEN DATE_SUB(NOW(), INTERVAL ((1440*14)+1440) MINUTE) AND DATE_SUB(NOW(), INTERVAL (1440*14) MINUTE) 
+     AND ${GROUP_VAR} = '${LOCALE}' AND application = '/${CONTEXT}' 
+     AND total_calls > 0 
+     ORDER BY 1 DESC LIMIT ${num_calls},1) 
+     UNION ALL 
+     (SELECT quanta_begin, TIMESTAMPDIFF(MINUTE,quanta_begin,DATE_SUB(NOW(), INTERVAL (1440*21) MINUTE)) AS diff 
+     FROM ve.monitoring FORCE INDEX (quanta_begin) 
+     WHERE quanta_begin BETWEEN DATE_SUB(NOW(), INTERVAL ((1440*21)+1440) MINUTE) AND DATE_SUB(NOW(), INTERVAL (1440*21) MINUTE) 
+     AND ${GROUP_VAR} = '${LOCALE}' AND application = '/${CONTEXT}' 
+     AND total_calls > 0 
+     ORDER BY 1 DESC LIMIT ${num_calls},1)
+     ORDER BY 2
+     ;`
+
+     # execute query
+     SQL_RETURN=(`echo "$SQL_QUERY" | ${MYSQL} 2>&1 `)
+
+     # put into a variables
+     DURATION=${SQL_RETURN[0]}
+     dur1=${SQL_RETURN[2]}
+     dur2=${SQL_RETURN[5]}
+     dur3=${SQL_RETURN[8]}
+
+     if [ "$TDURATION" -gt 0 ] ; then                             # use the threshold duration as an override 
+          DURATION=$TDURATION
+     else
+          #if [ "$dur1" = "NULL" -o "$dur1" = "" ] ; then          # flag that prevent processing if there is no duration entry
+          #     has_Duration=1
+          #elif [ "$dur3" != "NULL" -a "$dur3" != "" ] ; then
+          #     DURATION=$dur2
+          #elif [ "$dur2" != "NULL" -a "$dur2" != "" ] ; then
+          #    DURATION=$(($(($dur1 + $dur2))/2))
+          #else
+          #     DURATION=$dur1
+          #fi
+
+          #if [ "$has_Duration" -eq 0 ] ; then                     # to avoid false pages in the event of slow replication, hardcode duration to 5 minutes if calculation is < 5 minutes
+          #     if [ "$DURATION" -lt 5 ] ; then 
+                    DURATION=5
+          #     fi
+          #fi
+     fi
+}
+
+
+function isWebApp() {
+
+     if [ ${#CONTEXT} -gt 4 ] ; then              # only run if context has more than 4 characters
+          if [ ${CONTEXT:(-4)} = "-web" ] ; then
+               WebApp=1
+               has_Duration=0
+          fi
+     fi
+
+# beg temp stuff
+#     if [ $WebApp -eq 0 ] ; then        # only override min calls for voice apps
+#          if [ ${CONTEXT} != "co-fare" -a ${CONTEXT} != "co-recon"  -a ${CONTEXT} != "hdc" -a ${CONTEXT} != "gdi-notify" -a ${CONTEXT} != "co-notify" -a ${CONTEXT} != "co-notify-resnh" -a ${CONTEXT} != "co-notify-ressl" -a ${CONTEXT} != "rc-cr" -a ${CONTEXT} != "rc-os" -a ${CONTEXT} != "rc-upsell" -a ${CONTEXT} != "mpcs-wnp" ] ; then 
+#               MIN_CALLS_SHORT=2
+#          fi
+#     fi
+# end temp stuff
+
+}
+
+
+function getData() {
+         
+     SQL_QUERY=`cat <<+
+     SELECT sum(total_calls),\
+     sum(exceptions),\
+     sum(backend_errors),\
+     sum(app_data_5),\
+     sum(app_data_2),\
+     sum(app_data_3),\
+     sum(transfer_errors),\
+     round(100*if(sum(total_calls) > 0, sum(exceptions)/sum(total_calls),0)) , \
+     round(100*if(sum(total_calls) > 0, sum(backend_errors)/sum(total_calls), 0)), \
+     round(100*if(sum(total_calls) > 0, sum(app_data_5)/sum(total_calls), 0)) ,\
+     round(100*if(sum(total_calls) > 0, sum(app_data_2)/sum(total_calls), 0)) ,\
+     round(100*if(sum(total_calls) > 0, sum(app_data_3)/sum(total_calls), 0)) ,\
+     round(100*if(sum(total_calls) > 0, sum(transfer_errors)/sum(total_calls), 0)) \
+     from monitoring where  quanta_begin > date_sub(NOW(), INTERVAL ${DURATION} MINUTE) \
+     and ${GROUP_VAR} = '${LOCALE}' and application = '/${CONTEXT}';`
+
+     # execute query
+     SQL_RETURN=(`echo "$SQL_QUERY" | ${MYSQL} 2>&1 `)
+      
+     if [ "$?" -ne 0 ] ; then
+          (( Y_ERR++)) # Somethings wrong with the connection to the DB.
+          # No point in proceeding Set our err condition and exit.
+          # This probably means that we've specified the wrong
+          # DB so just set YELLOW and print STDERR received from
+          # mysql(1).
+          msg_compose="${SQL_RETURN[@]}"
+          return
+     fi
+
+     # put into variables
+     TOTAL_CALLS=${SQL_RETURN[0]}
+     ERRORS=${SQL_RETURN[1]}
+     BACKEND_ERR=${SQL_RETURN[2]}
+     APP_DATA1=${SQL_RETURN[3]}
+     APP_DATA2=${SQL_RETURN[4]}
+     APP_DATA3=${SQL_RETURN[5]}
+     TRANSFER_ERR=${SQL_RETURN[6]}
+     PERCENT_ERR=${SQL_RETURN[7]}
+     PERCENT_BACKEND_ERR=${SQL_RETURN[8]}
+     PERCENT_APP_DATA1=${SQL_RETURN[9]}
+     PERCENT_APP_DATA2=${SQL_RETURN[10]}
+     PERCENT_APP_DATA3=${SQL_RETURN[11]}
+     PERCENT_TRANSFER_ERR=${SQL_RETURN[12]}
+       
+     if [ "$TOTAL_CALLS" = "NULL" ] ; then
+          TOTAL_CALLS=0
+     fi
+
+     if [ "$ERRORS" = "NULL" ] ; then
+          ERRORS=0
+     fi
+
+     if [ "$BACKEND_ERR" = "NULL" ] ; then
+          BACKEND_ERR=0
+     fi
+
+     if [ "$APP_DATA1" = "NULL" ] ; then
+          APP_DATA1=0
+     fi
+
+     if [ "$APP_DATA2" = "NULL" ] ; then
+          APP_DATA2=0
+     fi
+
+     if [ "$APP_DATA3" = "NULL" ] ; then
+          APP_DATA3=0
+     fi
+
+     if [ "$TRANSFER_ERR" = "NULL" ] ; then
+          TRANSFER_ERR=0
+     fi
+}
+
+
+function check_ad() {
+
+     if [ "$[AD${1}_TYPE]" -eq "1" -a $TOTAL_CALLS -ge $MIN_SAMPLE ] ; then                                    # only run % check if enough calls
+          if [ "$[PERCENT_APP_DATA${1}]" -ge "$[AD${1}_RED]" -a "$[AD${1}_RED]" -gt 0 ] ; then
+               export msg_ad${1}="AD$1: $[APP_DATA${1}] ($[PERCENT_APP_DATA${1}]%)"
+               (( R_ERR++ ))
+               (( R_ad${1}++ ))
+          elif [ "$[PERCENT_APP_DATA${1}]" -ge "$[AD${1}_YELLOW]" -a "$[AD${1}_YELLOW]" -gt 0 ] ; then
+               export msg_ad${1}="AD$1: $[APP_DATA${1}] ($[PERCENT_APP_DATA${1}]%)"
+               (( Y_ERR++ )) 
+               (( Y_ad${1}++ ))
+          else 
+               export msg_ad${1}="AD$1: $[APP_DATA${1}] ($[PERCENT_APP_DATA${1}]%)"
+          fi   
+     elif [ "$[AD${1}_TYPE]" -eq "2" ] ; then                                                                  # absolute count check
+          if [ "$[APP_DATA${1}]" -ge "$[AD${1}_RED]" -a "$[AD${1}_RED]" -gt 0 ] ; then
+               export msg_ad${1}="AD$1: $[APP_DATA${1}]"
+               (( R_ERR++ ))
+               (( R_ad${1}++ ))
+          elif [ "$[APP_DATA${1}]" -ge "$[AD${1}_YELLOW]" -a "$[AD${1}_YELLOW]" -gt 0 ] ; then
+               export msg_ad${1}="AD$1: $[APP_DATA${1}]"
+               (( Y_ERR++ ))
+               (( Y_ad${1}++ ))
+          else
+               export msg_ad${1}="AD$1: $[APP_DATA${1}]"
+          fi     
+     fi
+}
+
+
+function check_java() {
+
+     if [ $WebApp -eq 0 ] ; then
+
+          if [ $PERCENT_ERR -ge $EXC_RED -a $PERCENT_ERR -ne 0 ] ; then
+               (( R_ERR++ ))
+               (( R_java++ ))
+          elif [ $PERCENT_ERR -ge $EXC_YELLOW -a $PERCENT_ERR -ne 0 ] ; then
+               (( Y_ERR++ ))
+               (( Y_java++ ))
+          fi
+
+          msg_java="Java: $ERRORS ($PERCENT_ERR%)"
+
+     else
+          if [ $ERRORS -ge $EXC_RED -a $ERRORS -ne 0 ] ; then
+               (( R_ERR++ ))
+               (( R_java++ ))
+          elif [ $ERRORS -ge $EXC_YELLOW -a $ERRORS -ne 0 ] ; then
+               (( Y_ERR++ ))
+               (( Y_java++ ))
+          fi
+
+          msg_java="Java: $ERRORS"
+     fi
+}
+
+
+function check_bkend() {
+
+     if [ $BCK_RED -ne 999 ] ; then
+
+          if [ $WebApp -eq 0 ] ; then
+
+               if [ $PERCENT_BACKEND_ERR -ge $BCK_RED -a $PERCENT_BACKEND_ERR -ne 0 ] ; then
+                    (( R_ERR++ ))
+                    (( R_bkend++ ))
+               elif [ $PERCENT_BACKEND_ERR -ge $BCK_YELLOW -a $PERCENT_BACKEND_ERR -ne 0 ] ; then
+                    (( Y_ERR++ ))
+                    (( Y_bkend++ ))
+               fi
+
+               msg_bkend="Bkend: $BACKEND_ERR ($PERCENT_BACKEND_ERR%)"
+
+          else
+               if [ $BACKEND_ERR -ge $BCK_RED -a $BACKEND_ERR -ne 0 ] ; then
+                    (( R_ERR++ ))
+                    (( R_bkend++ ))
+               elif [ $BACKEND_ERR -ge $BCK_YELLOW -a $BACKEND_ERR -ne 0 ] ; then
+                    (( Y_ERR++ ))
+                    (( Y_bkend++ ))
+               fi
+
+               msg_bkend="Bkend: $BACKEND_ERR"
+          fi
+
+     else
+          msg_bkend="Bkend: Check not performed during standing maintenance window"
+     fi
+}
+
+
+function check_transfer() {
+
+     if [ $TRANSFER_ERR -ge $TRANSFER_RED -a $TRANSFER_ERR -ne 0 ] ; then
+          (( R_ERR++ ))
+          (( R_transfer++ ))
+     elif [ $TRANSFER_ERR -ge $TRANSFER_YELLOW -a $TRANSFER_ERR -ne 0 ] ; then
+          (( Y_ERR++ ))
+          (( Y_transfer++ ))
+     fi
+
+     msg_transfer="Transfers: $TRANSFER_ERR"
+}
+
+
+function check_CV() {
+
+     # query total calls that occured during short duration
+     SQL_QUERY=`cat <<+
+     SELECT sum(total_calls)
+     from monitoring where  quanta_begin > date_sub(NOW(), INTERVAL ${DURATION} MINUTE) \
+     and  ${GROUP_VAR} = '${LOCALE}' AND application = '/${CONTEXT}';`
+
+     # execute query
+     SQL_RETURN=(`echo "$SQL_QUERY" | ${MYSQL} 2>&1 `)
+
+     # put total short duration calls into a variable
+     TOTAL_SD_CALLS=${SQL_RETURN[0]}
+
+     # if there are no records, set total calls to zero
+     if [ "$TOTAL_SD_CALLS" = "NULL" ] ; then
+          TOTAL_SD_CALLS=0
+     fi
+
+     # determine if total short duration calls are under threshold and set appropriate flag and message
+     if [ $TOTAL_SD_CALLS -ge $MIN_CALLS_SHORT ] ; then
+          msg_cv="Calls: $TOTAL_SD_CALLS Time: $DURATION"
+     elif [ $MIN_CALLS_SHORT -gt 0 ] ; then
+          msg_cv="Calls: $TOTAL_SD_CALLS < Min: $MIN_CALLS_SHORT Time: $DURATION"
+          (( R_ERR++ ))
+          (( R_cv++ ))
+     else
+          # this should never trip, but just in case
+          msg_cv="CV [Time: $DURATION; minimum call check not performed at this time]"
+     fi
+}
+
+function compose_msg() {
+
+     if [ $R_ERR -gt 0 -a $R_cv -eq 0 ] ; then     # CV is handled separately
+          msg_compose="check-abg-main Critical\n__OUTPUT__\n"
+          if [ $R_java -gt 0 ] ; then
+               if [ $add_space -gt 0 ] ; then     # add a space
+                    msg_compose="${msg_compose[@]}\n"
+               fi
+               msg_compose="${msg_compose[@]}\n$msg_java"
+               (( add_space++ ))
+               java_status="Critical"
+          fi
+
+          if [ $R_bkend -gt 0 ] ; then
+               if [ $add_space -gt 0 ] ; then     # add a space
+                    msg_compose="${msg_compose[@]} "
+               fi
+               msg_compose="${msg_compose[@]}\n$msg_bkend"
+               (( add_space++ ))
+               backend_status="Critical"
+          fi
+
+          if [ $R_transfer -gt 0 ] ; then
+               if [ $add_space -gt 0 ] ; then     # add a space
+                    msg_compose="${msg_compose[@]} "
+               fi
+               msg_compose="${msg_compose[@]}\n$msg_transfer"
+               (( add_space++ ))
+               transfer_status="Critical"
+          fi
+
+          if [ $R_ad1 -gt 0 ] ; then
+               if [ $add_space -gt 0 ] ; then     # add a space
+                    msg_compose="${msg_compose[@]} "
+               fi
+
+               msg_compose="${msg_compose[@]}\n$msg_ad1"
+               (( add_space++ ))
+               ad1_status="Critical"
+          fi
+
+          if [ $R_ad2 -gt 0 ] ; then
+               if [ $add_space -gt 0 ] ; then     # add a space
+                    msg_compose="${msg_compose[@]} "
+               fi
+
+               msg_compose="${msg_compose[@]}\n$msg_ad2"
+               (( add_space++ ))
+               ad2_status="Critical"
+          fi
+
+          if [ $R_ad3 -gt 0 ] ; then
+               if [ $add_space -gt 0 ] ; then     # add a space
+                    msg_compose="${msg_compose[@]} "
+               fi
+
+               msg_compose="${msg_compose[@]}\n$msg_ad3"
+               (( add_space++ ))
+               ad3_status="Critical"
+          fi
+
+          msg_compose="${msg_compose[@]}\nCalls: $TOTAL_CALLS Time: $DURATION"
+
+          if [ $R_cv -gt 0 ] ; then
+               if [ $add_space -gt 0 ] ; then     # add a space
+                    msg_compose="${msg_compose[@]} "
+               fi
+
+               msg_compose="${msg_compose[@]}\n$msg_cv"
+               (( add_space++ ))
+               cv_status="Critical"
+          fi
+
+     elif [ $Y_ERR -gt 0 -a $R_cv -eq 0 ] ; then
+
+          msg_compose="check-abg-main Warning\n__OUTPUT__\n"
+
+          if [ $Y_java -gt 0 ] ; then
+               if [ $add_space -gt 0 ] ; then     # add a space
+                    msg_compose="${msg_compose[@]} "
+               fi
+
+               msg_compose="${msg_compose[@]}\n$msg_java"
+               (( add_space++ ))
+               java_status="Warning"
+          fi
+
+          if [ $Y_bkend -gt 0 ] ; then
+               if [ $add_space -gt 0 ] ; then     # add a space
+                    msg_compose="${msg_compose[@]} "
+               fi
+
+               msg_compose="${msg_compose[@]}\n$msg_bkend"
+               (( add_space++ ))
+               backend_status="Warning"
+          fi
+
+          if [ $Y_transfer -gt 0 ] ; then
+               if [ $add_space -gt 0 ] ; then     # add a space
+                    msg_compose="${msg_compose[@]} "
+               fi
+
+               msg_compose="${msg_compose[@]}\n$msg_transfer"
+               (( add_space++ ))
+               transfer_status="Warning"
+          fi
+
+          if [ $Y_ad1 -gt 0 ] ; then
+               if [ $add_space -gt 0 ] ; then     # add a space
+                    msg_compose="${msg_compose[@]} "
+               fi
+
+               msg_compose="${msg_compose[@]}\n$msg_ad1"
+               (( add_space++ ))
+               ad1_status="Warning"
+          fi
+
+          if [ $Y_ad2 -gt 0 ] ; then
+               if [ $add_space -gt 0 ] ; then     # add a space
+                    msg_compose="${msg_compose[@]} "
+               fi
+
+               msg_compose="${msg_compose[@]}\n$msg_ad2"
+               (( add_space++ ))
+               ad2_status="Warning"
+          fi
+
+          if [ $Y_ad3 -gt 0 ] ; then
+               if [ $add_space -gt 0 ] ; then     # add a space
+                    msg_compose="${msg_compose[@]} "
+               fi
+
+               msg_compose="${msg_compose[@]}\n$msg_ad3"
+               (( add_space++ ))
+               ad3_status="Warning"
+          fi
+
+          msg_compose="${msg_compose[@]}\nCalls: $TOTAL_CALLS Time: $DURATION"
+
+     elif [ $R_cv -gt 0 ] ; then
+
+          msg_compose="check-abg-main Critical\n__OUTPUT__\n[$msg_cv]"
+          cv_status="Critical"
+
+     else
+          msg_compose="check-abg-main OK\n__OUTPUT__\n$msg_java\n$msg_bkend\n$msg_transfer"
+
+
+          if [ "$AD1_TYPE" -gt "0" ] ; then
+               msg_compose="${msg_compose[@]}\n$msg_ad1"
+          fi
+
+
+          if [ "$AD2_TYPE" -gt "0" ] ; then
+               msg_compose="${msg_compose[@]}\n$msg_ad2"
+          fi
+
+
+          if [ "$AD3_TYPE" -gt "0" ] ; then
+               msg_compose="${msg_compose[@]}\n$msg_ad3"
+          fi
+
+          msg_compose="${msg_compose[@]}\nCalls: $TOTAL_CALLS Time: $DURATION\nCV [$msg_cv]\n"
+     fi
+}
+
+function writeAudit() {
+     #write all pertinent information to the Nagios audit table
+
+     if [ "$has_Threshold" -eq 0 ] ; then        # only insert all values if there are threshold entries
+          if [ "$dur1" = "NULL" -o "$dur1" = "" ] ; then
+               dur1="Null"
+          fi
+
+          if [ "$dur2" = "NULL" -o "$dur2" = "" ] ; then
+               dur2="Null"
+          fi
+
+          if [ "$dur3" = "NULL" -o "$dur3" = "" ] ; then
+               dur3="Null"
+          fi
+
+          if [ "$DURATION" = "NULL" -o "$DURATION" = "" ] ; then
+               DURATION="Null"
+          fi
+
+          if [ "$TDURATION" = "NULL" -o "$TDURATION" = "" ] ; then
+               TDURATION="Null"
+          fi
+
+          SQL_QUERY=`cat <<+
+          INSERT into ve.nagios_results 
+          (time, 
+          application, 
+          message,  
+          status, 
+          java_status, 
+          backend_status, 
+          transfer_status, 
+          cv_status, 
+          ad1_status, 
+          ad2_status, 
+          ad3_status, 
+          duration, 
+          dur1, 
+          dur2, 
+          dur3, 
+          tduration) 
+          VALUES (now(),
+          '/${CONTEXT}-${LOCALE}', 
+          '$msg_compose', 
+          '$overall_status', 
+          '$java_status',
+          '$backend_status',
+          '$transfer_status',
+          '$cv_status',
+          '$ad1_status',
+          '$ad2_status',
+          '$ad3_status',
+          $DURATION, 
+          $dur1, 
+          $dur2, 
+          $dur3, 
+          $TDURATION)
+          ;`
+     else
+          SQL_QUERY=`cat <<+
+          INSERT into ve.nagios_results 
+          (time, 
+          application, 
+          message,  
+          status) 
+          VALUES (now(),
+          '/${CONTEXT}', 
+          '$msg_compose', 
+          '$overall_status') 
+          ;`
+     fi
+
+     # execute query
+     SQL_RETURN=(`echo "$SQL_QUERY" | ${MYSQL} 2>&1 `)
+}
+
+### End Functions ###
+ 
+
+### Begin Check - the meat of the script ###
+
+getThreshold        # Reporting thresholds
+getDuration         # Calculate average duration over the past 3 weeks
+isWebApp            # Determine if context is a web application
+
+if [ "$has_Threshold" -eq 0 -a "$has_Duration" -eq 0 ] ; then        # only run if there are threshold entries
+
+     # short duration call volume
+     if [ "$MIN_CALLS_SHORT" = "NULL" ] ; then
+          MIN_CALLS_SHORT = 0
+     elif [ "$MIN_CALLS_SHORT" -gt "0" ] ; then
+          check_CV            # Check short duration call volume
+     else
+          msg_cv="not performed at this time"
+     fi
+
+     getData               # Get call info
+     #check_ad 1
+     #check_ad 2
+     #check_ad 3
+
+     if [ $TOTAL_CALLS -ge $MIN_SAMPLE -o $WebApp -eq 1 ] ; then
+          check_java             # Check for Java errors
+          check_bkend            # Check for Backend errors
+          check_transfer         # Check for Tranfer errors 
+     fi
+
+     if [ $TOTAL_CALLS -ge $MIN_SAMPLE -o $R_ERR -gt 0 -o $Y_ERR -gt 0 -o $WebApp -eq 1 ] ; then
+          compose_msg                 # build the message string  
+     else
+          msg_compose="OK [Check not performed: Calls: $TOTAL_CALLS < Threshold: $MIN_SAMPLE; Time: $DURATION] CV [$msg_cv]"
+     fi
+elif [ "$has_Threshold" -eq 1 ] ; then        # no threshold value message                                       
+     msg_compose="No threshold values"
+else 
+     msg_compose="No calls during the previous 3 weeks at this time"
+fi
+
+### End Check ###
+
+
+### Set flags and exit ###
+
+if [ "$R_ERR" -gt "0" ] ; then
+     flag=2
+     overall_status="Critical"
+elif [ "$Y_ERR" -gt "0" ] ; then
+     flag=1
+     overall_status="Warning"
+fi
+
+writeAudit
+echo -e "$msg_compose"
+echo -e "$msg_data"
+exit $flag

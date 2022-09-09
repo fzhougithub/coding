@@ -1,0 +1,111 @@
+#!/bin/bash
+#
+# Version 0.0.0 - Oct/2014
+# Changes: check if the file modified time is less than current time beyond a point
+# Assumption: The file configuration is correct and the coresponsing app name provided is correct
+#
+
+LOG_FILE_PATH=
+APP_NAME=
+warning=
+critical=
+STATUS_URL=
+
+function help {
+        echo -e "\n\tThis plugin shows the difference between the current time and last time the file got modified , also checks for standard java errors \n\n\t$0:\n\t\t-f logfile you wish to track\n\t\t-a appname that writes into the file \n\t\t-c <integer>\tIf the time last updated is above <integer>, returns CRITICAL state\n\t\t-w <integer>\tIf the time last updated is below CRITICAL and above <integer>, returns WARNING state\n\t\t-u health check url\n\t\t "
+        exit -1
+}
+function validate_javaerrors {
+JAVA_ERRORS='java.lang.OutOfMemoryError
+'
+for JAVA_ERROR in `echo $JAVA_ERRORS`
+do
+        grep -i $JAVA_ERROR $LOG_FILE_PATH > /dev/null 2>&1 < /dev/null
+        if [ $? -eq 0 ]
+        then
+        echo "CRITICAL APP [$APP_NAME] Has Critical Java errors"
+        grep -i $JAVA_ERROR $LOG_FILE_PATH
+        echo "LAST 100 lines in $LOG_FILE_PATH"
+        echo "--------------------"
+        tail -100 $LOG_FILE_PATH
+        exit 2
+        fi
+done
+
+}
+# Getting parameters:
+while getopts "f:a:w:c:u:h" OPT; do
+        case $OPT in
+                "f") LOG_FILE_PATH=$OPTARG;;
+                "a") APP_NAME=$OPTARG;;
+                "w") warning=$OPTARG;;
+                "c") critical=$OPTARG;;
+                "u") STATUS_URL=$OPTARG;;
+                "h") help;;
+        esac
+done
+# Checking parameters:
+( [ "$LOG_FILE_PATH" == "" ]  ) && echo "ERROR: Specify file to be watched" && help
+( [ "$APP_NAME" == "" ]  ) && echo "ERROR: Specify App Name for the file to be watched " && help
+( [ "$warning" == "" ] || [ "$critical" == "" ] ) && echo "ERROR: You must specify warning and critical levels" && help
+[[ "$warning" -ge  "$critical" ]] && echo "ERROR: critical level must be highter than warning level" && help
+
+if [ !  -f  "$LOG_FILE_PATH" ]
+then
+        # Wait for few seconds to see if file gets recreated, this happens quite often as the files are archived.
+        sleep 5
+        if [ !  -f  "$LOG_FILE_PATH" ]
+        then
+                echo "$LOG_FILE_PATH doesnot exist"
+                status=2
+                exit $status
+        fi
+fi
+
+if [ ! -s "$LOG_FILE_PATH" ]
+then
+  if [ ! -z $STATUS_URL ]
+  then
+    status=`/usr/local/bin/curl $STATUS_URL`
+    if [ "$status" == "Status: OK" ]
+    then
+      echo "$LOG_FILE_PATH is empty however $STATUS_URL is responding OK"
+      echo "OK APP [$APP_NAME] is running fine "
+      exit 0
+    fi
+  fi
+fi
+
+validate_javaerrors
+
+
+
+CURRENT_TIME=`date +"%Y-%m-%d %H:%M:%S"`
+LAST_MODIFIED_TIME=`date -r $LOG_FILE_PATH +"%Y-%m-%d %H:%M:%S"`
+SECONDS=$(( ( $(date -ud "$CURRENT_TIME" +'%s') - $(date -ud "$LAST_MODIFIED_TIME" +'%s') ) ))
+MINUTES=`echo "$SECONDS / 60" | bc`
+
+# Comparing the result and setting the correct level:
+if [[ $MINUTES -ge $critical ]]; then
+        echo "CRITICAL APP [$APP_NAME] is not running or hung"
+        echo "__OUTPUT__"
+        echo "APP [$APP_NAME] last updated LOG [$LOG_FILE_PATH] in [$MINUTES] minutes"
+        echo "LAST 100 lines in $LOG_FILE_PATH"
+        echo "--------------------"
+        tail -100 $LOG_FILE_PATH
+        status=2
+else if [[ $MINUTES -ge $warning ]]; then
+        echo "WARNING APP [$APP_NAME] is not running or hung"
+        echo "__OUTPUT__"
+        echo "APP [$APP_NAME] last updated LOG [$LOG_FILE_PATH] in [$MINUTES] minutes"
+        echo "LAST 100 lines in $LOG_FILE_PATH"
+        echo "--------------------"
+        tail -100 $LOG_FILE_PATH
+        status=1
+     else
+        echo "OK $APP [$APP_NAME] is running fine "
+        status=0
+     fi
+fi
+
+exit $status

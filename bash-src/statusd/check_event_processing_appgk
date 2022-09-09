@@ -1,0 +1,81 @@
+#/bin/bash 
+###[2015-12-29 03:35:41,306]  INFO [L:com.tfsc.ilabs.chronos.queue.stream.impl.ChronosQueueStreamConsumer T:'pool-356-thread-7' I: IS: TR:STARTUP SQ:41047 ND:]  - Pushing chronos event to Stream Handler. ClientID:nemo-client-capitalone StreamID:nemo-client-capitaloneva1exitsurvey-event-handlerOEEvent PartitionID:2 CorrelationId:724a42a7-68ad-43fe-abe3-d485f67749ce eventRaisedTime 1,451,359,836,403
+
+eventTypes=$1
+criticalThreshold=$2
+warningThreshold=$3
+logstmt=$4
+filepath=$5
+
+eventType=(${eventTypes//,/ })
+output=
+
+##status
+_OK=0
+_WARNING=1
+_CRITICAL=2
+status=$_OK
+criticalCount=1;
+
+for i in "${eventType[@]}"
+do
+        log=`grep "$logstmt.*$i.*" $filepath | tail -1`
+        if [ ! -z "$log" -a "$log"!=" " ]; then
+
+                currentTime=`date +%s%3N`
+
+                logDate=`echo $log | cut -d']' -f1 | cut -d'[' -f2`
+                processedTime=`date --date="$logDate" +%s%3N`
+
+                diff=`expr $currentTime - $processedTime`
+
+                 if [ "$diff" -ge "$criticalThreshold" ]; then
+                        status=$_CRITICAL
+                        output[$count]="CRITICAL: $i is not processed for the past $diff milliseconds"
+                        logs[$count]=$log
+                        count=$((count+1))
+                 elif [ "$diff" -ge "$warningThreshold" ]; then
+                        if [ "$status" -eq "$_WARNING" ]; then
+                                status=$_CRITICAL
+                        elif [ "$status" -eq "$_OK" ]; then
+                                status=$_WARNING
+                        fi
+
+                        output[$count]="WARNING: $i is not processed for the past $diff milliseconds"
+                        logs[$count]=$log
+                        count=$((count+1))
+                 else
+                        output[$count]="OK: $i is not processed for the past $diff milliseconds"
+                        logs[$count]=$log
+                        count=$((count+1))
+                 fi
+        else
+                 status=$_CRITICAL
+                 output[$count]="CRITICAL: $i is not processed in the current hour"
+                 logs[$count]="No events of type $i are processed so far"
+                 count=$((count+1))
+        fi
+done
+
+
+if [ "$status" == "$_CRITICAL" ]; then
+        echo "CRITICAL: Events of one or more type are processed for $criticalThreshold milliseconds"
+elif [ "$status" == "$_WARNING" ]; then
+        echo "WARNING: Events of one or more type are processed for $warningThreshold milliseconds"
+else
+        echo "OK: The Application is up and processing events as expected"
+fi
+
+echo "__OUTPUT__"
+for i in "${output[@]}"
+do
+      echo $i
+done
+
+echo "__DATA__"
+for i in "${logs[@]}"
+do
+        echo $i
+done
+
+exit $status

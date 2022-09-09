@@ -1,0 +1,177 @@
+#!/bin/bash
+#
+# Version 0.0.0 - Sep/2014
+# Changes: check if the java garbage collector is taking more than a certain time.
+# Assumption: the gc timings are available in /var/tellme/logs/gc.log
+#
+
+# Sample log line
+#2017-09-27T17:00:08.092+0000: 33029.263: [Full GC (Heap Inspection Initiated GC) 2017-09-27T17:00:08.092+0000: 33029.263: [CMS: 107273K->84128K(349568K), 0.3785657 secs] 182400K->84128K(507904K), [Metaspace: 75380K->75380K(1122304K)], 0.3789548 secs] [Times: user=0.38 sys=0.00, real=0.38 secs] 
+
+# Sample parameters
+# -m 1024m -w 70,8,300 -c 90,12,90
+
+# Parameters Explanation
+# -m : the max memory
+# -w : 70,8,300 => 70% of max memory(will be matched against 507904K in above sample log line), 8 is the real time (will be matched against real=0.38 secs in above log line), 300 is average time between full gc (will be matched against 2017-09-27T17:00:08.092+0000: 33029.263: in the above sample log line).
+# -c : 90,12,90 => 90% of max memory(will be matched against 507904K in above sample log line), 12 is the real time (will be matched against real=0.38 secs in above log line), 90 is average time between full gc (will be matched against 2017-09-27T17:00:08.092+0000: 33029.263: in the above sample log line).
+
+GC_LOG=
+function help {
+	echo -e "\n\tThis plugin shows the time taken for full garbage collector , using the information dumped in $GC_LOG \n\n\t$0:\n\t\t-c <integer>\tIf the time taken is above <integer>, returns CRITICAL state\n\t\t-w <integer>\tIf the time taken is below CRITICAL and above <integer>, returns WARNING state\n\t\t -f if the gc log is in a  different location (default /var/tellme/logs/gc.log)"
+	exit -1
+}
+# Getting parameters:
+while getopts "m:w:c:f:l:h" OPT; do
+	case $OPT in
+		"m") max=${OPTARG%?};;
+		"w") warning=$OPTARG;;
+		"c") critical=$OPTARG;;
+		"f") GC_LOG=$OPTARG;;
+		"l") NO_OF_LINES=$OPTARG;;
+		"h") help;;
+	esac
+done
+
+# Checking parameters:
+( [ "$max" == "" ]  ) && max=3096
+( [ "$GC_LOG" == "" ]  ) && GC_LOG="/var/tellme/logs/gc.log"
+( [ "$NO_OF_LINES" == "" ]  ) && NO_OF_LINES=1000
+( [ "$warning" == "" ] || [ "$critical" == "" ] ) && echo "ERROR: You must specify warning and critical levels" && help
+#[[ "$warning" -ge  "$critical" ]] && echo "ERROR: critical level must be highter than warning level" && help
+
+GC_LOG=`ls -t $GC_LOG* | head -n 1`
+
+count=0
+for v in $(echo $warning | sed 's/,/ /g')
+do
+	if [[ $count -eq 0 ]]; then
+		#since max is in MB, multiply by 1000 to get KB and also since bash does not support floating-point division, multiply by 0.01 (i.e 1/100)
+		res=`echo $max \* 1000 \* $v \* 0.01| bc`
+        warning_vars[$count]=${res%.*}
+	else
+		warning_vars[$count]=$v
+	fi
+	count=`expr $count + 1`
+done
+
+count=0
+for v in $(echo $critical| sed 's/,/ /g')
+do
+	if [[ $count -eq 0 ]]; then
+		#since max is in MB, multiply by 1000 to get KB and also since bash does not support floating-point division, multiply by 0.01 (i.e 1/100)
+		res=`echo $max \* 1000 \* $v \* 0.01| bc`
+        critical_vars[$count]=${res%.*}
+	else
+		critical_vars[$count]=$v
+	fi
+	count=`expr $count + 1`
+done
+
+#echo warning_vars "${warning_vars[@]}"
+#echo critical_vars "${critical_vars[@]}"
+#echo warning size ${#warning_vars[@]}
+
+if [[ ${#warning_vars[@]} -ne 3 || ${#critical_vars[@]} -ne 3 ]]; then
+	echo "warning and critical must have three values" && help
+fi
+
+if [ !  -f  "$GC_LOG" ]
+then
+	echo -e "$GC_LOG doesnot exist" && help 
+fi
+
+NUM_OF_FULLGC=3
+LINE_TO_GREP=`expr $NUM_OF_FULLGC \* 2`
+
+COUNTER=1
+sum=0
+count=0
+mem=0
+prev_timestamp_date=""
+realtime=0
+lastfullgc=false
+while read -r out; do
+	if ! [[ $out =~ "Full" || $out =~ "concurrent mode failure" ]]; then
+		lastfullgc=false;
+		continue;
+	fi
+
+	if [[ $out =~ "concurrent mode failure" && $lastfullgc = false ]]; then
+		continue;
+	fi
+
+	time=`echo $out | sed 's/^.*real=//g' | sed 's/\..*$//g'`
+	re='^[0-9]+$'
+	if [[ "$time" =~ $re ]] ; then
+			realtime=$time
+	fi
+
+	if [[ $out =~ "Metaspace" ]]; then
+		mem=`echo $out | sed 's/^.*secs\] .*->\(.*\)(.*), \[Metaspace.*/\1/'`
+	fi
+
+	if [[ $out =~ "Full" ]]; then
+		lastfullgc=true;
+		timestamp=`echo $out | sed 's/^\(.*\)T\(.*\)+.*Full.*/\1 \2/'`
+		timestamp_date=$(date -u -d "$timestamp" +"%s")
+		#echo "timestamp_date = $timestamp_date and previous_timestamp_date = $prev_timestamp_date";
+		if [ "$timestamp_date" != "" -a "$prev_timestamp_date" != "" ]
+		then
+			diff=`expr $timestamp_date - $prev_timestamp_date`
+			#echo "diff = $diff"
+			sum=`expr $sum + $diff`
+			count=`expr $count + 1`
+			#echo "sum=$sum and count=$count"
+        	fi
+                if [[ ! $out =~ "Heap Inspection" ]]; then
+			prev_timestamp_date=$timestamp_date
+			COUNTER=$((COUNTER + 1))
+                fi
+
+	else
+		lastfullgc=false;
+	fi
+done <<< "$(tail -"$NO_OF_LINES" $GC_LOG | grep -E "(Full|concurrent mode failure)" | tail -"$LINE_TO_GREP")" 
+
+avg_time_bw_fullgc=0
+#echo "sum=$sum and count=$count"
+if [ $count -gt 0 ]
+then
+	avg_time_bw_fullgc=`expr $sum / $count`
+	#echo "Average time bw full gc $avg_time_bw_fullgc"
+else 
+        avg_time_bw_fullgc=`expr ${warning_vars[2]} + 10`
+fi
+
+#echo "realtime_secs=$realtime, fullgc_freq_secs=$avg_time_bw_fullgc"
+# Comparing the result and setting the correct level:
+mem_no_k_suffix=`echo $mem | sed 's/K//g'`;
+if [[ $mem_no_k_suffix -ge ${critical_vars[0]} || $realtime -ge ${critical_vars[1]} ]]; then
+        msg="CRITICAL"
+        status=2
+elif [[ $mem_no_k_suffix -ge ${warning_vars[0]} || $realtime -ge ${warning_vars[1]} ]]; then
+        msg="WARNING"
+        status=1
+else
+        msg="OK"
+        status=0
+fi
+
+if [[ $status -eq 0 ]]; then
+if [[ $avg_time_bw_fullgc -lt ${critical_vars[2]} ]]; then
+        msg="CRITICAL"
+        status=2
+elif [[ $avg_time_bw_fullgc -lt ${warning_vars[2]} ]]; then
+        msg="WARNING"
+        status=1
+else
+        msg="OK"
+        status=0
+fi
+fi
+
+# Printing the results:
+echo "$msg GC - [memory=$mem, realtime_secs=$realtime, fullgc_freq_secs=$avg_time_bw_fullgc] ;$warning;$critical;"
+
+exit $status
